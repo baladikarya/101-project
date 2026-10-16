@@ -12,12 +12,12 @@
     {
       "binding": "DB",
       "database_name": "ai-virtual-office-db",
-      "database_id": "GANTI_DENGAN_ID_D1",
+      "database_id": "47b471e6-b476-4504-97df-e1d3fd0bdc15",
       "migrations_dir": "db/migrations"
     }
   ],
   "vars": {
-    "OWNER_GITHUB_LOGIN": "GANTI_DENGAN_USERNAME_GITHUB"
+    "OWNER_GITHUB_LOGIN": "baladikarya"
   },
   "observability": { "enabled": true }
 }
