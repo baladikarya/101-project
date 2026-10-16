@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ai-virtual-office",
+  "name": "101-project",
   "main": "apps/api/src/index.ts",
   "compatibility_date": "2025-10-01",
   "assets": {
