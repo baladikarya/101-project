@@ -1,0 +1,12 @@
+{
+  "name": "@avo/api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@avo/shared": "*",
+    "hono": "^4.13.13",
+    "zod": "^4.6.7"
+  }
+}

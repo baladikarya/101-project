@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+:root {
+  --floor: #e8ecf1;
+  --surface: #ffffff;
+  --ink: #111827;
+  --muted: #5b6577;
+  --line: #d5dae3;
+  --accent: #2f4bff;
+  --accent-ink: #ffffff;
+  --ok: #0f8a5f;
+  --bad: #b42318;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --floor: #0c111d;
+    --surface: #151c2c;
+    --ink: #e8ecf6;
+    --muted: #9aa5ba;
+    --line: #263046;
+    --accent: #8da0ff;
+    --accent-ink: #0c111d;
+    --ok: #4cc79a;
+    --bad: #ff8a7a;
+  }
+}
+
+@theme inline {
+  --color-floor: var(--floor);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-ok: var(--ok);
+  --color-bad: var(--bad);
+  --font-sans: "Avenir Next", "Segoe UI Variable Text", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--floor);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

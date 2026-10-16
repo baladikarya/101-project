@@ -1,0 +1,23 @@
+{
+  "name": "ai-virtual-office",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev:web": "npm run dev -w @avo/web",
+    "dev:api": "wrangler dev",
+    "build": "npm run build -w @avo/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261015.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.151.0"
+  }
+}

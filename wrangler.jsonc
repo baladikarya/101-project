@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-virtual-office",
+  "main": "apps/api/src/index.ts",
+  "compatibility_date": "2025-10-01",
+  "assets": {
+    "directory": "apps/web/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-virtual-office-db",
+      "database_id": "GANTI_DENGAN_ID_D1",
+      "migrations_dir": "db/migrations"
+    }
+  ],
+  "vars": {
+    "OWNER_GITHUB_LOGIN": "GANTI_DENGAN_USERNAME_GITHUB"
+  },
+  "observability": { "enabled": true }
+}
