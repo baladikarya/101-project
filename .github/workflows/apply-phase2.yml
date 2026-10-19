@@ -1,0 +1,48 @@
+name: Apply Phase 2 patch
+
+# Dijalankan manual: Actions -> "Apply Phase 2 patch" -> Run workflow.
+# Menerapkan phase2.patch, menjalankan typecheck + tes + build,
+# lalu commit ke main hanya jika semuanya lulus. Setelah itu file ini
+# dan phase2.patch boleh dihapus.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Terapkan patch
+        run: |
+          test -f phase2.patch
+          git apply --index phase2.patch
+          git rm -q -f phase2.patch
+          git status --short
+
+      - name: Pasang dependensi
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tes
+        run: npm test
+
+      - name: Build web
+        run: npm run build
+
+      - name: Commit dan push ke main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Fase 2: AI Manager pertama (Groq + Workflow + tab Tugas)"
+          git push origin HEAD:main
