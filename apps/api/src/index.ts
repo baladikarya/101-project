@@ -2,7 +2,11 @@ import { Hono } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import { auth, requireUser } from "./auth";
 import type { AppEnv } from "./env";
+import { taskRoutes } from "./phase2/routes";
 import { isSameOrigin } from "./util";
+
+// Cloudflare Workflows: class harus diekspor dari entry Worker.
+export { ManagerTaskWorkflow } from "./phase2/workflow";
 
 const app = new Hono<AppEnv>();
 
@@ -36,6 +40,11 @@ app.get("/api/health", async (c) => {
 app.route("/api/auth", auth);
 
 app.get("/api/me", requireUser, (c) => c.json(c.get("user")));
+
+// Fase 2: tugas AI Manager (khusus pemilik yang sudah login).
+app.use("/api/tasks", requireUser);
+app.use("/api/tasks/*", requireUser);
+app.route("/api/tasks", taskRoutes);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {

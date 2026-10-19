@@ -88,3 +88,21 @@ OAuth App lokal memakai callback `http://localhost:8787/api/auth/github/callback
 - Sesi: token acak 256-bit, hanya hash SHA-256 yang disimpan di D1; cookie `HttpOnly`, `SameSite=Lax`, `Secure` di HTTPS, masa berlaku 30 hari.
 - CSRF: request yang mengubah data wajib berasal dari origin yang sama.
 - Belum ada rate limiting; itu bagian Fase 6.
+
+## Fase 2 — AI Manager pertama (Groq + Cloudflare Workflows)
+
+Yang ditambahkan: adapter penyedia AI (Groq), pencatat token dari respons asli, AI Manager yang berjalan lewat Cloudflare Workflow, hasil di D1, dan tab **Tugas** (status, riwayat, Pause/Resume/Retry).
+
+1. **D1**: jalankan `db/migrations/0002_phase2.sql` di tab Console database (idempoten, tabel berawalan `p2_`).
+2. **Secret**: Worker → **Settings → Variables and Secrets** → tambahkan `GROQ_API_KEY` (tipe **Secret**). Kunci gratis dari console.groq.com.
+3. **Opsional** (variabel biasa): `GROQ_MODEL` (default `llama-3.3-70b-versatile`) dan `MAX_TASKS_PER_DAY` (default `50`, hitungan hari UTC).
+4. Push ke `main`; Cloudflare membangun dan men-deploy otomatis. Binding Workflow `TASK_WORKFLOW` sudah ada di `wrangler.jsonc`.
+
+Uji dari HP: buka tab **Tugas** → kirim tugas → status Antre → Berjalan → Selesai → tutup browser lalu buka lagi; hasil dan token tetap ada.
+
+Catatan perilaku:
+
+- Angka token = yang dilaporkan Groq. Bila tidak ada, tampil `—` (tidak ditebak).
+- Pause berlaku setelah langkah Workflow yang sedang jalan selesai (status sementara **Menjeda…**).
+- Retry membuat instance Workflow baru; maksimal 5 percobaan per tugas. Error 429/5xx dari Groq dicoba ulang otomatis 3x; 400/401/403/404 langsung gagal.
+- Batas harian tugas melindungi kuota gratis (Free Tier Only).
