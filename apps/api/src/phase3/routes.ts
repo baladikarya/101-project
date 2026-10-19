@@ -80,7 +80,7 @@ function mapInstance(s: string): RunStatus | null {
 
 // Samakan status D1 dengan instance Workflow. 'awaiting_approval' di D1 adalah keadaan yang
 // lebih spesifik daripada 'waiting' milik Workflow, jadi tidak boleh ditimpa 'running'.
-async function syncStatus<
+export async function syncStatus<
   T extends { id: string; status: RunStatus; instance_id: string | null; error: string | null },
 >(env: Phase3Env, run: T): Promise<T> {
   if (!ACTIVE.includes(run.status) || !run.instance_id) return run;

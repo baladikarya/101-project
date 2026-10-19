@@ -4,6 +4,7 @@ import { auth, requireUser } from "./auth";
 import type { AppEnv } from "./env";
 import { taskRoutes } from "./phase2/routes";
 import { runRoutes } from "./phase3/routes";
+import { officeRoutes } from "./phase4/office";
 import { isSameOrigin } from "./util";
 
 // Cloudflare Workflows: class harus diekspor dari entry Worker.
@@ -52,6 +53,11 @@ app.route("/api/tasks", taskRoutes);
 app.use("/api/runs", requireUser);
 app.use("/api/runs/*", requireUser);
 app.route("/api/runs", runRoutes);
+
+// Fase 4: status agent untuk kantor (khusus pemilik).
+app.use("/api/office", requireUser);
+app.use("/api/office/*", requireUser);
+app.route("/api/office", officeRoutes);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {

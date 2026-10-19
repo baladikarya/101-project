@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Account } from "./Account";
-import { Agents } from "./Agents";
-import { HomeIcon, ListIcon, UserIcon, UsersIcon } from "./icons";
+import { HomeIcon, ListIcon, OfficeIcon, UserIcon, UsersIcon } from "./icons";
+import { Office } from "./Office";
 import { Overview } from "./Overview";
 import { Runs } from "./Runs";
 import { Tasks } from "./Tasks";
@@ -10,7 +10,7 @@ const TABS = [
   { id: "overview", label: "Ringkasan", Icon: HomeIcon },
   { id: "tasks", label: "Tugas", Icon: ListIcon },
   { id: "runs", label: "Tim", Icon: UsersIcon },
-  { id: "agents", label: "Agent", Icon: UsersIcon },
+  { id: "office", label: "Kantor", Icon: OfficeIcon },
   { id: "account", label: "Akun", Icon: UserIcon },
 ] as const;
 
@@ -29,7 +29,7 @@ export function Shell() {
         {tab === "overview" && <Overview />}
         {tab === "tasks" && <Tasks />}
         {tab === "runs" && <Runs />}
-        {tab === "agents" && <Agents />}
+        {tab === "office" && <Office />}
         {tab === "account" && <Account />}
       </main>
 

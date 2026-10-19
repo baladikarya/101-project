@@ -221,3 +221,36 @@ export const RunDetailSchema = z.object({
   events: z.array(z.object({ id: z.string(), type: z.string(), message: z.string(), created_at: z.number() })),
 });
 export type RunDetail = z.infer<typeof RunDetailSchema>;
+
+// ---- Fase 4: kantor (status agent nyata dari database) ----
+export const AGENT_STATES = ["idle", "working", "waiting", "paused", "error"] as const;
+export const AgentStateSchema = z.enum(AGENT_STATES);
+export type AgentState = z.infer<typeof AgentStateSchema>;
+
+export const OfficeSchema = z.object({
+  agents: z.array(
+    z.object({
+      id: z.string(),
+      state: AgentStateSchema,
+      /** Judul langkah/tugas yang sedang dikerjakan (null bila idle). */
+      activity: z.string().nullable(),
+      /** Judul alur/tugas induknya. */
+      context: z.string().nullable(),
+      error: z.string().nullable(),
+      last_active: nullNum,
+      steps_done: z.number(),
+      total_tokens: z.number(),
+    }),
+  ),
+  generated_at: z.number(),
+});
+export type Office = z.infer<typeof OfficeSchema>;
+export type OfficeAgent = Office["agents"][number];
+
+export const AGENT_STATE_LABEL: Record<AgentState, string> = {
+  idle: "Santai",
+  working: "Bekerja",
+  waiting: "Menunggu persetujuan",
+  paused: "Dijeda",
+  error: "Bermasalah",
+};

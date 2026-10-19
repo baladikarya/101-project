@@ -59,3 +59,11 @@ export function ListIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+export function OfficeIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" {...base} aria-hidden="true" {...props}>
+      <path d="M5 21V4h9v17M14 9h5v12M3 21h18M8.5 8h2M8.5 12h2M8.5 16h2" />
+    </svg>
+  );
+}

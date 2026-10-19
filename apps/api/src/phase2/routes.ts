@@ -76,7 +76,7 @@ function mapInstance(s: string): TaskStatus | null {
 }
 
 // Samakan status D1 dengan status instance Workflow yang sebenarnya.
-async function syncStatus<
+export async function syncStatus<
   T extends { id: string; status: TaskStatus; instance_id: string | null; error: string | null },
 >(env: Phase2Env, task: T): Promise<T> {
   if (!ACTIVE.includes(task.status) || !task.instance_id) return task;
