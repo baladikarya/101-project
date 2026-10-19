@@ -95,7 +95,7 @@ Yang ditambahkan: adapter penyedia AI (Groq), pencatat token dari respons asli, 
 
 1. **D1**: jalankan `db/migrations/0002_phase2.sql` di tab Console database (idempoten, tabel berawalan `p2_`).
 2. **Secret**: Worker → **Settings → Variables and Secrets** → tambahkan `GROQ_API_KEY` (tipe **Secret**). Kunci gratis dari console.groq.com.
-3. **Opsional** (variabel biasa): `GROQ_MODEL` (default `llama-3.3-70b-versatile`) dan `MAX_TASKS_PER_DAY` (default `50`, hitungan hari UTC).
+3. **Opsional** (variabel biasa): `GROQ_MODEL` (default `openai/gpt-oss-20b`; daftar model resmi di `console.groq.com/docs/models`) dan `MAX_TASKS_PER_DAY` (default `50`, hitungan hari UTC).
 4. Push ke `main`; Cloudflare membangun dan men-deploy otomatis. Binding Workflow `TASK_WORKFLOW` sudah ada di `wrangler.jsonc`.
 
 Uji dari HP: buka tab **Tugas** → kirim tugas → status Antre → Berjalan → Selesai → tutup browser lalu buka lagi; hasil dan token tetap ada.

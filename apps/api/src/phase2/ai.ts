@@ -43,7 +43,7 @@ export class AiError extends Error {
 
 interface GroqResponse {
   model?: string;
-  choices?: { message?: { content?: string | null } }[];
+  choices?: { message?: { content?: string | null }; finish_reason?: string | null }[];
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -52,7 +52,9 @@ interface GroqResponse {
 }
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile";
+// Daftar model Groq berubah-ubah (llama-3.x kini hanya Enterprise). Ganti lewat variabel GROQ_MODEL
+// tanpa mengubah kode. Daftar resmi: console.groq.com/docs/models
+const GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b";
 
 export class GroqProvider implements AiProvider {
   readonly name = "groq";
@@ -78,8 +80,10 @@ export class GroqProvider implements AiProvider {
         body: JSON.stringify({
           model: this.model,
           messages,
-          max_tokens: opts.maxTokens ?? 1024,
+          max_completion_tokens: opts.maxTokens ?? 2048,
           temperature: opts.temperature ?? 0.4,
+          // Model penalar (gpt-oss) memakai sebagian token untuk "berpikir"; tekan agar jawaban tidak terpotong.
+          ...(this.model.startsWith("openai/gpt-oss-") ? { reasoning_effort: "low" } : {}),
         }),
         signal: AbortSignal.timeout(45_000),
       });
@@ -95,12 +99,23 @@ export class GroqProvider implements AiProvider {
       const body = (await res.text().catch(() => "")).slice(0, 300);
       // 429 (rate limit) & 5xx layak dicoba ulang; 400/401/403/404 tidak.
       const retryable = res.status === 429 || res.status >= 500;
-      throw new AiError(`Groq ${res.status}: ${body}`, res.status, retryable);
+      const hint =
+        res.status === 404 || body.includes("model_not_found")
+          ? ` — model "${this.model}" tidak tersedia untuk kunci ini. Ganti variabel GROQ_MODEL (daftar: console.groq.com/docs/models).`
+          : "";
+      throw new AiError(`Groq ${res.status}: ${body}${hint}`, res.status, retryable);
     }
 
     const data = (await res.json()) as GroqResponse;
-    const text = data.choices?.[0]?.message?.content ?? "";
-    if (!text.trim()) throw new AiError("Groq: respons kosong", null, true);
+    const choice = data.choices?.[0];
+    const text = choice?.message?.content ?? "";
+    if (!text.trim()) {
+      // Terpotong di batas token (mis. model penalar kehabisan token): mengulang tidak membantu.
+      if (choice?.finish_reason === "length") {
+        throw new AiError("Groq: jawaban terpotong di batas token sebelum selesai.", null, false);
+      }
+      throw new AiError("Groq: respons kosong", null, true);
+    }
 
     return {
       text,
