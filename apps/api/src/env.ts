@@ -1,6 +1,6 @@
-import type { Phase2Env } from "./phase2/shared";
+import type { Phase3Env } from "./phase3/shared";
 
-export interface Env extends Phase2Env {
+export interface Env extends Phase3Env {
   OWNER_GITHUB_LOGIN: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;

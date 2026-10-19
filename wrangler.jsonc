@@ -21,6 +21,11 @@
       "name": "manager-task-workflow",
       "binding": "TASK_WORKFLOW",
       "class_name": "ManagerTaskWorkflow"
+    },
+    {
+      "name": "pipeline-run-workflow",
+      "binding": "RUN_WORKFLOW",
+      "class_name": "PipelineRunWorkflow"
     }
   ],
   "vars": {

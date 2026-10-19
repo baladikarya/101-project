@@ -3,11 +3,13 @@ import { Account } from "./Account";
 import { Agents } from "./Agents";
 import { HomeIcon, ListIcon, UserIcon, UsersIcon } from "./icons";
 import { Overview } from "./Overview";
+import { Runs } from "./Runs";
 import { Tasks } from "./Tasks";
 
 const TABS = [
   { id: "overview", label: "Ringkasan", Icon: HomeIcon },
   { id: "tasks", label: "Tugas", Icon: ListIcon },
+  { id: "runs", label: "Tim", Icon: UsersIcon },
   { id: "agents", label: "Agent", Icon: UsersIcon },
   { id: "account", label: "Akun", Icon: UserIcon },
 ] as const;
@@ -26,13 +28,14 @@ export function Shell() {
       <main className="flex-1 overflow-y-auto px-5 pb-6">
         {tab === "overview" && <Overview />}
         {tab === "tasks" && <Tasks />}
+        {tab === "runs" && <Runs />}
         {tab === "agents" && <Agents />}
         {tab === "account" && <Account />}
       </main>
 
       <nav
         aria-label="Navigasi utama"
-        className="grid grid-cols-4 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)]"
+        className="grid grid-cols-5 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)]"
       >
         {TABS.map(({ id, label, Icon }) => (
           <button
