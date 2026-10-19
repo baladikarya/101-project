@@ -6,12 +6,62 @@ import {
   type Office as OfficeData,
   type OfficeAgent,
 } from "@avo/shared";
-import { useCallback, useEffect, useState } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import { ApiError, getJson } from "../api";
 import { BottomSheet } from "./BottomSheet";
 import { Desk } from "./icons";
 
 const POLL_MS = 5000;
+const VIEW_KEY = "avo.office.view";
+
+// Three.js hanya diunduh saat tampilan 3D benar-benar dibuka.
+const Scene3D = lazy(() => import("./Scene3D"));
+
+type View = "3d" | "2d";
+
+function webglOk(): boolean {
+  try {
+    const c = document.createElement("canvas");
+    return !!(c.getContext("webgl2") ?? c.getContext("webgl"));
+  } catch {
+    return false;
+  }
+}
+
+function initialView(): View {
+  try {
+    const saved = localStorage.getItem(VIEW_KEY);
+    if (saved === "2d") return "2d";
+  } catch {
+    // penyimpanan tidak tersedia
+  }
+  return webglOk() ? "3d" : "2d";
+}
+
+function useMedia(query: string): boolean {
+  const [on, setOn] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const fn = () => setOn(mq.matches);
+    mq.addEventListener("change", fn);
+    return () => mq.removeEventListener("change", fn);
+  }, [query]);
+  return on;
+}
+
+// Bila 3D gagal dimuat atau dirender, jatuh ke tampilan 2D alih-alih layar kosong.
+class SceneBoundary extends Component<{ onFail: () => void; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch() {
+    this.props.onFail();
+  }
+  render() {
+    return this.state.failed ? null : this.props.children;
+  }
+}
 
 const DOT: Record<AgentState, string> = {
   idle: "bg-muted",
@@ -74,6 +124,24 @@ export function Office() {
   const [data, setData] = useState<OfficeData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [view, setView] = useState<View>(initialView);
+  const [note, setNote] = useState<string | null>(null);
+  const dark = useMedia("(prefers-color-scheme: dark)");
+  const reduced = useMedia("(prefers-reduced-motion: reduce)");
+
+  const pick = (v: View) => {
+    setView(v);
+    setNote(null);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      // abaikan
+    }
+  };
+  const fail3d = useCallback(() => {
+    setView("2d");
+    setNote("Tampilan 3D tidak bisa dimuat di perangkat ini. Memakai tampilan 2D.");
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -110,6 +178,34 @@ export function Office() {
           {error}
         </p>
       )}
+      <div role="group" aria-label="Pilih tampilan" className="mb-3 inline-flex rounded-xl border border-line p-0.5 text-sm">
+        {(["3d", "2d"] as const).map((v) => (
+          <button
+            key={v}
+            onClick={() => pick(v)}
+            aria-pressed={view === v}
+            className={`rounded-lg px-4 py-1.5 font-medium ${view === v ? "bg-accent text-accent-ink" : "text-muted"}`}
+          >
+            {v === "3d" ? "3D" : "2D"}
+          </button>
+        ))}
+      </div>
+      {note && <p className="mb-3 text-sm text-muted">{note}</p>}
+
+      {view === "3d" && data ? (
+        <div>
+          <div className="h-[min(62vh,30rem)] overflow-hidden rounded-2xl border border-line">
+            <SceneBoundary onFail={fail3d}>
+              <Suspense fallback={<p className="p-4 text-sm text-muted">Memuat kantor 3D…</p>}>
+                <Scene3D agents={data.agents} dark={dark} reduced={reduced} onSelect={setSelected} />
+              </Suspense>
+            </SceneBoundary>
+          </div>
+          <p className="mt-2 text-xs text-muted">
+            Ketuk agent untuk detail · geser untuk memutar · cubit untuk zoom.
+          </p>
+        </div>
+      ) : (
       <ul className="grid grid-cols-2 gap-3">
         {data?.agents.map((a) => (
           <li key={a.id}>
@@ -128,6 +224,7 @@ export function Office() {
           </li>
         ))}
       </ul>
+      )}
       {agent && <AgentSheet agent={agent} onClose={() => setSelected(null)} />}
     </div>
   );

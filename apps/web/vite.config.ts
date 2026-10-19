@@ -30,8 +30,18 @@ export default defineConfig({
         // Jangan pernah mencegat navigasi ke API (login OAuth berupa navigasi biasa).
         navigateFallbackDenylist: [/^\/api\//],
         globPatterns: ["**/*.{js,css,html,svg,png,webmanifest}"],
+        // Bundel 3D (~250 KB gzip) tidak ikut diunduh saat instalasi; disimpan saat pertama dipakai.
+        globIgnores: ["**/Scene3D-*.js"],
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }: { url: URL }) => /\/assets\/Scene3D-.*\.js$/.test(url.pathname),
+            handler: "CacheFirst",
+            options: { cacheName: "scene3d", expiration: { maxEntries: 3 } },
+          },
+        ],
       },
     }),
   ],
+  build: { chunkSizeWarningLimit: 1000 },
   server: { proxy: { "/api": "http://localhost:8787" } },
 });
