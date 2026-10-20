@@ -14,6 +14,7 @@ export interface PrInput {
   branch: string;
   files: PrFile[];
   base?: string;
+  token?: string;
 }
 
 export interface PrResult {
@@ -52,13 +53,50 @@ function encodePath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
 }
 
+interface ContentsResponse {
+  type?: string;
+  sha: string;
+  content?: string;
+  encoding?: string;
+}
+
+export function fromBase64Utf8(b64: string): string {
+  const bin = atob(b64.replace(/\s+/g, ""));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+// Baca file dari repo. Mengembalikan null kalau file belum ada.
+export async function readRepoFile(
+  token: string,
+  path: string,
+  ref: string,
+): Promise<{ content: string; sha: string } | null> {
+  try {
+    const res = await githubRequest<ContentsResponse>(
+      token,
+      "GET",
+      `/repos/${GITHUB_REPO}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`,
+      "read_file",
+    );
+    if (res.type !== "file" || res.encoding !== "base64") {
+      throw new GithubError("read_file", `bukan file biasa: ${path}`);
+    }
+    return { content: fromBase64Utf8(res.content ?? ""), sha: res.sha };
+  } catch (err) {
+    if (err instanceof GithubError && err.status === 404) return null;
+    throw err;
+  }
+}
+
 export async function openPullRequest(env: GithubEnv, input: PrInput): Promise<PrResult> {
   assertSafeBranch(input.branch);
   if (input.files.length === 0) throw new GithubError("validate", "minimal satu file");
   for (const f of input.files) assertSafePath(f.path);
   const base = input.base ?? "main";
 
-  const { token } = await getInstallationToken(env);
+  const token = input.token ?? (await getInstallationToken(env)).token;
   const repo = `/repos/${GITHUB_REPO}`;
 
   const ref = await githubRequest<{ object: { sha: string } }>(
@@ -72,10 +110,12 @@ export async function openPullRequest(env: GithubEnv, input: PrInput): Promise<P
     sha: ref.object.sha,
   });
   for (const f of input.files) {
+    const existing = await readRepoFile(token, f.path, input.branch);
     await githubRequest(token, "PUT", `${repo}/contents/${encodePath(f.path)}`, "commit_file", {
       message: `agent: ${input.title}`.slice(0, 200),
       content: toBase64Utf8(f.content),
       branch: input.branch,
+      ...(existing ? { sha: existing.sha } : {}),
     });
   }
   const pr = await githubRequest<{ number: number; html_url: string }>(token, "POST", `${repo}/pulls`, "create_pr", {

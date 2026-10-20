@@ -5,6 +5,7 @@ import type { AppEnv } from "./env";
 import { taskRoutes } from "./phase2/routes";
 import { runRoutes } from "./phase3/routes";
 import { officeRoutes } from "./phase4/office";
+import { codeRoutes } from "./phase5/code-routes";
 import { githubRoutes } from "./phase5/github";
 import { isSameOrigin } from "./util";
 
@@ -64,6 +65,11 @@ app.route("/api/office", officeRoutes);
 app.use("/api/github", requireUser);
 app.use("/api/github/*", requireUser);
 app.route("/api/github", githubRoutes);
+
+// Fase 5: tugas coding -> Pull Request (khusus pemilik).
+app.use("/api/code-tasks", requireUser);
+app.use("/api/code-tasks/*", requireUser);
+app.route("/api/code-tasks", codeRoutes);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {
