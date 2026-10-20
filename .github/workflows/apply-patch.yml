@@ -1,21 +1,23 @@
 name: Apply patch
 
-# Cara pakai: upload `change.patch` ke root repo, lalu
-# Actions -> "Apply patch" -> Run workflow (isi pesan commit).
-# Patch diterapkan, dicek (typecheck + tes + build), lalu di-commit ke main
-# HANYA jika semuanya lulus. change.patch dihapus otomatis setelah itu.
-# Hanya pengguna dengan akses tulis ke repo yang bisa menjalankannya.
+# Cara pakai: upload `change.patch` ke root repo (branch main), lalu
+# Actions -> "Apply patch" -> Run workflow (isi judul PR).
+# Patch diterapkan ke branch patch/run-<id>, dicek (typecheck + tes + build),
+# lalu dibuka Pull Request ke main dan CI dijalankan. Kamu yang merge.
+# change.patch ikut terhapus saat PR di-merge.
 
 on:
   workflow_dispatch:
     inputs:
       message:
-        description: Pesan commit
+        description: Judul PR / pesan commit
         required: true
         default: Terapkan change.patch
 
 permissions:
   contents: write
+  pull-requests: write
+  actions: write
 
 concurrency:
   group: apply-patch
@@ -24,6 +26,10 @@ concurrency:
 jobs:
   apply:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MESSAGE: ${{ inputs.message }}
+      BRANCH: patch/run-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,8 +46,9 @@ jobs:
             exit 1
           fi
 
-      - name: Terapkan patch
+      - name: Buat branch dan terapkan patch
         run: |
+          git checkout -b "$BRANCH"
           git apply --index change.patch
           git rm -q -f change.patch
           git status --short
@@ -58,11 +65,18 @@ jobs:
       - name: Build web
         run: npm run build
 
-      - name: Commit dan push ke main
-        env:
-          MESSAGE: ${{ inputs.message }}
+      - name: Commit dan push branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "$MESSAGE"
-          git push origin HEAD:main
+          git push origin "$BRANCH"
+
+      - name: Buka Pull Request
+        run: |
+          gh pr create --base main --head "$BRANCH" --title "$MESSAGE" \
+            --body "Patch diterapkan otomatis oleh workflow Apply patch. Typecheck, tes, dan build sudah lulus di workflow. Merge jika check test hijau."
+
+      - name: Jalankan CI di branch
+        # PR dari GITHUB_TOKEN tidak memicu CI otomatis; dispatch manual memberi check "test" pada commit PR.
+        run: gh workflow run ci.yml --ref "$BRANCH"
