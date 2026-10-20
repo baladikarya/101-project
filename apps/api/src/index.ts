@@ -7,6 +7,7 @@ import { runRoutes } from "./phase3/routes";
 import { officeRoutes } from "./phase4/office";
 import { codeRoutes } from "./phase5/code-routes";
 import { githubRoutes } from "./phase5/github";
+import { rateLimit } from "./phase6/rate-limit";
 import { isSameOrigin } from "./util";
 
 // Cloudflare Workflows: class harus diekspor dari entry Worker.
@@ -30,6 +31,14 @@ app.use("/api/*", async (c, next) => {
   }
   await next();
 });
+
+// Fase 6: rate limiting (per IP, jendela 60 detik, disimpan di D1).
+app.use("/api/auth/*", rateLimit({ name: "auth", limit: 30, windowSec: 60 }));
+app.use("/api/*", rateLimit({ name: "api", limit: 300, windowSec: 60 }));
+app.use(
+  "/api/*",
+  rateLimit({ name: "write", limit: 20, windowSec: 60, methods: ["POST", "PUT", "PATCH", "DELETE"] }),
+);
 
 app.get("/api/health", async (c) => {
   let db = false;
