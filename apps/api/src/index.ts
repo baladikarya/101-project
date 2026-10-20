@@ -5,6 +5,7 @@ import type { AppEnv } from "./env";
 import { taskRoutes } from "./phase2/routes";
 import { runRoutes } from "./phase3/routes";
 import { officeRoutes } from "./phase4/office";
+import { githubRoutes } from "./phase5/github";
 import { isSameOrigin } from "./util";
 
 // Cloudflare Workflows: class harus diekspor dari entry Worker.
@@ -58,6 +59,11 @@ app.route("/api/runs", runRoutes);
 app.use("/api/office", requireUser);
 app.use("/api/office/*", requireUser);
 app.route("/api/office", officeRoutes);
+
+// Fase 5: koneksi GitHub App (khusus pemilik).
+app.use("/api/github", requireUser);
+app.use("/api/github/*", requireUser);
+app.route("/api/github", githubRoutes);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {
