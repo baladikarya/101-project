@@ -13,6 +13,7 @@ import { Desk } from "./icons";
 
 const POLL_MS = 5000;
 const VIEW_KEY = "avo.office.view";
+const LOW_KEY = "avo.office.low";
 
 // Three.js hanya diunduh saat tampilan 3D benar-benar dibuka.
 const Scene3D = lazy(() => import("./Scene3D"));
@@ -36,6 +37,27 @@ function initialView(): View {
     // penyimpanan tidak tersedia
   }
   return webglOk() ? "3d" : "2d";
+}
+
+// Tebakan awal untuk HP lemah. Pilihan pengguna (tersimpan) selalu menang.
+function autoLow(): boolean {
+  const n = navigator as Navigator & { deviceMemory?: number; connection?: { saveData?: boolean } };
+  return (
+    (n.deviceMemory !== undefined && n.deviceMemory <= 2) ||
+    (n.hardwareConcurrency !== undefined && n.hardwareConcurrency <= 4) ||
+    n.connection?.saveData === true
+  );
+}
+
+function initialLow(): boolean {
+  try {
+    const saved = localStorage.getItem(LOW_KEY);
+    if (saved === "on") return true;
+    if (saved === "off") return false;
+  } catch {
+    // penyimpanan tidak tersedia
+  }
+  return autoLow();
 }
 
 function useMedia(query: string): boolean {
@@ -126,6 +148,7 @@ export function Office() {
   const [selected, setSelected] = useState<string | null>(null);
   const [view, setView] = useState<View>(initialView);
   const [note, setNote] = useState<string | null>(null);
+  const [low, setLow] = useState(initialLow);
   const dark = useMedia("(prefers-color-scheme: dark)");
   const reduced = useMedia("(prefers-reduced-motion: reduce)");
 
@@ -134,6 +157,15 @@ export function Office() {
     setNote(null);
     try {
       localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      // abaikan
+    }
+  };
+  const toggleLow = () => {
+    const next = !low;
+    setLow(next);
+    try {
+      localStorage.setItem(LOW_KEY, next ? "on" : "off");
     } catch {
       // abaikan
     }
@@ -190,6 +222,17 @@ export function Office() {
           </button>
         ))}
       </div>
+      {view === "3d" && (
+        <button
+          onClick={toggleLow}
+          aria-pressed={low}
+          className={`mb-3 ml-2 rounded-xl border px-3 py-2 text-sm font-medium ${
+            low ? "border-accent text-accent" : "border-line text-muted"
+          }`}
+        >
+          Hemat grafis: {low ? "nyala" : "mati"}
+        </button>
+      )}
       {note && <p className="mb-3 text-sm text-muted">{note}</p>}
 
       {view === "3d" && data ? (
@@ -197,7 +240,7 @@ export function Office() {
           <div className="h-[min(62vh,30rem)] overflow-hidden rounded-2xl border border-line">
             <SceneBoundary onFail={fail3d}>
               <Suspense fallback={<p className="p-4 text-sm text-muted">Memuat kantor 3D…</p>}>
-                <Scene3D agents={data.agents} dark={dark} reduced={reduced} onSelect={setSelected} />
+                <Scene3D agents={data.agents} dark={dark} reduced={reduced} low={low} onSelect={setSelected} onLost={fail3d} />
               </Suspense>
             </SceneBoundary>
           </div>

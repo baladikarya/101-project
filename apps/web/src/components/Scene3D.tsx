@@ -62,10 +62,11 @@ interface DeskProps {
   index: number;
   dark: boolean;
   reduced: boolean;
+  low: boolean;
   onSelect: (id: string) => void;
 }
 
-function AgentDesk({ agent, index, dark, reduced, onSelect }: DeskProps) {
+function AgentDesk({ agent, index, dark, reduced, low, onSelect }: DeskProps) {
   const role = ROLE[agent.id] ?? { short: agent.id, shirt: "#5b6577" };
   const state = agent.state;
   const color = STATE_COLOR[state];
@@ -133,7 +134,7 @@ function AgentDesk({ agent, index, dark, reduced, onSelect }: DeskProps) {
 
       {/* cincin status di lantai */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0.35]}>
-        <ringGeometry args={[1.2, 1.36, 40]} />
+        <ringGeometry args={[1.2, 1.36, low ? 20 : 40]} />
         <meshBasicMaterial color={color} transparent opacity={state === "idle" ? 0.4 : 0.95} />
       </mesh>
 
@@ -176,11 +177,11 @@ function AgentDesk({ agent, index, dark, reduced, onSelect }: DeskProps) {
       {/* avatar low-poly, menghadap monitor (-z) */}
       <group ref={body} position={[0, 0, 0.7]}>
         <mesh position={[0, 0.78, 0]}>
-          <cylinderGeometry args={[0.24, 0.28, 0.6, 10]} />
+          <cylinderGeometry args={[0.24, 0.28, 0.6, low ? 6 : 10]} />
           <meshLambertMaterial color={shirt} />
         </mesh>
         <mesh ref={head} position={[0, 1.27, 0]}>
-          <sphereGeometry args={[0.21, 12, 10]} />
+          <sphereGeometry args={[0.21, low ? 8 : 12, low ? 6 : 10]} />
           <meshLambertMaterial color="#e7b98f" />
         </mesh>
         <group ref={armL} position={[-0.34, 1.0, 0]}>
@@ -214,7 +215,8 @@ function AgentDesk({ agent, index, dark, reduced, onSelect }: DeskProps) {
 
 // Kamera sentuh: satu jari memutar, dua jari mencubit untuk zoom dan menggeser. Dibatasi agar
 // pengguna tidak "tersesat" di luar ruangan.
-function Controls() {
+function Controls({ low }: { low: boolean }) {
+  const invalidate = useThree((s) => s.invalidate);
   const camera = useThree((s) => s.camera) as THREE.OrthographicCamera;
   const dom = useThree((s) => s.gl.domElement);
   const width = useThree((s) => s.size.width);
@@ -226,7 +228,7 @@ function Controls() {
     camera.updateProjectionMatrix();
 
     const c = new OrbitControls(camera, dom);
-    c.enableDamping = true;
+    c.enableDamping = !low; // redaman butuh render tiap frame; dimatikan di mode hemat
     c.dampingFactor = 0.12;
     c.screenSpacePanning = false;
     c.minZoom = base * 0.7;
@@ -251,15 +253,31 @@ function Controls() {
       }
     };
     c.addEventListener("change", clamp);
+    const redraw = () => invalidate();
+    c.addEventListener("change", redraw);
     ref.current = c;
     return () => {
       c.removeEventListener("change", clamp);
+      c.removeEventListener("change", redraw);
       c.dispose();
       ref.current = null;
     };
-  }, [camera, dom, width]);
+  }, [camera, dom, width, low, invalidate]);
 
   useFrame(() => ref.current?.update());
+  return null;
+}
+
+// Mode hemat: render hanya saat ada perubahan, plus detak ~15 fps untuk animasi.
+function Ticker({ animate }: { animate: boolean }) {
+  const invalidate = useThree((s) => s.invalidate);
+  useEffect(() => {
+    if (!animate) return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") invalidate();
+    }, 66);
+    return () => clearInterval(id);
+  }, [animate, invalidate]);
   return null;
 }
 
@@ -267,16 +285,26 @@ interface Props {
   agents: OfficeAgent[];
   dark: boolean;
   reduced: boolean;
+  low: boolean;
   onSelect: (id: string) => void;
+  /** Konteks WebGL hilang (mis. memori HP habis): induk beralih ke 2D. */
+  onLost: () => void;
 }
 
-export default function Scene3D({ agents, dark, reduced, onSelect }: Props) {
+export default function Scene3D({ agents, dark, reduced, low, onSelect, onLost }: Props) {
   return (
     <Canvas
       orthographic
-      dpr={[1, 1.5]}
+      dpr={low ? 1 : [1, 1.5]}
+      frameloop={low ? "demand" : "always"}
       camera={{ position: [10, 10, 10], zoom: 30, near: -50, far: 200 }}
-      gl={{ antialias: true, powerPreference: "low-power" }}
+      gl={{ antialias: !low, powerPreference: "low-power" }}
+      onCreated={({ gl }) => {
+        gl.domElement.addEventListener("webglcontextlost", (e) => {
+          e.preventDefault();
+          onLost();
+        });
+      }}
       aria-label={`Kantor 3D, ${agents.filter((a) => a.state === "working").length} agent bekerja`}
     >
       <color attach="background" args={[dark ? "#0c111d" : "#e8ecf1"]} />
@@ -293,9 +321,10 @@ export default function Scene3D({ agents, dark, reduced, onSelect }: Props) {
       </mesh>
 
       {agents.map((a, i) => (
-        <AgentDesk key={a.id} agent={a} index={i} dark={dark} reduced={reduced} onSelect={onSelect} />
+        <AgentDesk key={a.id} agent={a} index={i} dark={dark} reduced={reduced} low={low} onSelect={onSelect} />
       ))}
-      <Controls />
+      <Controls low={low} />
+      {low && <Ticker animate={!reduced} />}
     </Canvas>
   );
 }
