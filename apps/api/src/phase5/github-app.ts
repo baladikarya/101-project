@@ -140,8 +140,24 @@ export async function getInstallationToken(env: GithubEnv): Promise<Installation
   return { token: body.token, expiresAt: body.expires_at, permissions: body.permissions ?? {} };
 }
 
-export async function githubGet<T>(token: string, path: string, step: string): Promise<T> {
-  const res = await fetch(`${GITHUB_API}${path}`, { headers: ghHeaders(token) });
+export async function githubRequest<T>(
+  token: string,
+  method: "GET" | "POST" | "PUT" | "PATCH",
+  path: string,
+  step: string,
+  body?: unknown,
+): Promise<T> {
+  const headers = ghHeaders(token);
+  const init: RequestInit = { method, headers };
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${GITHUB_API}${path}`, init);
   if (!res.ok) throw await failFrom(res, step);
   return (await res.json()) as T;
+}
+
+export function githubGet<T>(token: string, path: string, step: string): Promise<T> {
+  return githubRequest<T>(token, "GET", path, step);
 }
