@@ -1,0 +1,777 @@
+diff --git a/apps/api/src/index.ts b/apps/api/src/index.ts
+index da18dfc..45d904f 100644
+--- a/apps/api/src/index.ts
++++ b/apps/api/src/index.ts
+@@ -10,6 +10,7 @@ import { githubRoutes } from "./phase5/github";
+ import { auditMiddleware, auditRoutes } from "./phase6/audit";
+ import { cleanupMiddleware, maintenanceRoutes } from "./phase6/cleanup";
+ import { rateLimit } from "./phase6/rate-limit";
++import { projectRoutes } from "./phase7/routes";
+ import { isSameOrigin } from "./util";
+ 
+ // Cloudflare Workflows: class harus diekspor dari entry Worker.
+@@ -96,6 +97,11 @@ app.use("/api/maintenance", requireUser);
+ app.use("/api/maintenance/*", requireUser);
+ app.route("/api/maintenance", maintenanceRoutes);
+ 
++// Fase 7a: daftar proyek target (khusus pemilik).
++app.use("/api/projects", requireUser);
++app.use("/api/projects/*", requireUser);
++app.route("/api/projects", projectRoutes);
++
+ app.notFound((c) => c.json({ error: "not_found" }, 404));
+ app.onError((err, c) => {
+   console.error(err);
+diff --git a/apps/api/src/phase5/code-parse.ts b/apps/api/src/phase5/code-parse.ts
+index f066eaf..e7bd3d3 100644
+--- a/apps/api/src/phase5/code-parse.ts
++++ b/apps/api/src/phase5/code-parse.ts
+@@ -15,7 +15,13 @@ const DENY_PREFIXES = ["apps/api/src/phase5/"];
+ const DENY_FILES = new Set(["apps/api/src/auth.ts"]);
+ const DENY_BASENAMES = new Set(["package.json", "package-lock.json", "wrangler.jsonc"]);
+ 
+-export function assertAgentPath(path: string): void {
++// "self" = repo platform ini (aturan ketat). "external" = proyek terpisah di p7_projects.
++export type PathScope = "self" | "external";
++
++const EXTERNAL_DENY_PREFIXES = [".github/", ".git/", "node_modules/"];
++const EXTERNAL_DENY_BASENAMES = new Set(["yarn.lock", "pnpm-lock.yaml", ".gitmodules"]);
++
++export function assertAgentPath(path: string, scope: PathScope = "self"): void {
+   const segs = path.split("/");
+   const malformed =
+     path.length === 0 ||
+@@ -24,10 +30,19 @@ export function assertAgentPath(path: string): void {
+     path.includes("\\") ||
+     segs.some((s) => s === "" || s === "." || s === "..");
+   if (malformed) throw new AgentOutputError(`path tidak aman: ${path}`);
++  const base = segs[segs.length - 1] ?? "";
++  if (scope === "external") {
++    const denied =
++      EXTERNAL_DENY_PREFIXES.some((p) => path.startsWith(p)) ||
++      DENY_BASENAMES.has(base) ||
++      EXTERNAL_DENY_BASENAMES.has(base) ||
++      base.startsWith(".env");
++    if (denied) throw new AgentOutputError(`file terlarang untuk agent: ${path}`);
++    return;
++  }
+   if (!ALLOWED_PREFIXES.some((p) => path.startsWith(p))) {
+     throw new AgentOutputError(`path di luar apps/, packages/, docs/, db/: ${path}`);
+   }
+-  const base = segs[segs.length - 1] ?? "";
+   if (DENY_BASENAMES.has(base) || base.startsWith(".env")) {
+     throw new AgentOutputError(`file terlarang untuk agent: ${path}`);
+   }
+@@ -47,7 +62,7 @@ function stripFence(s: string): string {
+   return m?.[1] ?? s;
+ }
+ 
+-export function parseAgentOutput(text: string): AgentOutput {
++export function parseAgentOutput(text: string, scope: PathScope = "self"): AgentOutput {
+   const title = /^TITLE:[ \t]*(.+)$/m.exec(text)?.[1]?.trim().slice(0, 100);
+   if (!title) throw new AgentOutputError("jawaban AI tanpa baris TITLE");
+   const summary = (/^SUMMARY:[ \t]*(.+)$/m.exec(text)?.[1] ?? "").trim().slice(0, 500);
+@@ -57,7 +72,7 @@ export function parseAgentOutput(text: string): AgentOutput {
+   const seen = new Set<string>();
+   for (const m of text.matchAll(re)) {
+     const path = (m[1] ?? "").trim();
+-    assertAgentPath(path);
++    assertAgentPath(path, scope);
+     if (seen.has(path)) throw new AgentOutputError(`file ganda: ${path}`);
+     seen.add(path);
+     const content = `${stripFence(m[2] ?? "").replace(/\r\n/g, "\n")}\n`;
+diff --git a/apps/api/src/phase5/code-routes.ts b/apps/api/src/phase5/code-routes.ts
+index 611d0ac..a6dcd13 100644
+--- a/apps/api/src/phase5/code-routes.ts
++++ b/apps/api/src/phase5/code-routes.ts
+@@ -1,12 +1,14 @@
+ import { Hono } from "hono";
+ import type { AppEnv } from "../env";
+-import { AgentOutputError } from "./code-parse";
++import { getProject, isUsable, scopeOf } from "../phase7/projects";
++import { AgentOutputError, assertAgentPath } from "./code-parse";
+ import { MAX_INSTRUCTION_CHARS, dailyLimit, overDailyLimit, runCodeTask, validateInput, type CodeEnv } from "./code-task";
+ 
+ export const codeRoutes = new Hono<AppEnv>();
+ 
+ interface TaskRow {
+   id: string;
++  project: string | null;
+   instruction: string;
+   status: string;
+   title: string | null;
+@@ -21,7 +23,7 @@ interface TaskRow {
+ codeRoutes.get("/", async (c) => {
+   const env = c.env as unknown as CodeEnv;
+   const { results } = await env.DB.prepare(
+-    "SELECT id, instruction, status, title, pr_number, pr_url, error, total_tokens, created_at FROM p5_code_tasks ORDER BY created_at DESC LIMIT 20",
++    "SELECT id, project, instruction, status, title, pr_number, pr_url, error, total_tokens, created_at FROM p5_code_tasks ORDER BY created_at DESC LIMIT 20",
+   ).all<TaskRow>();
+   return c.json({ tasks: results, daily_limit: dailyLimit(env) });
+ });
+@@ -36,10 +38,20 @@ codeRoutes.post("/", async (c) => {
+     const msg = err instanceof AgentOutputError ? err.message : "input tidak valid";
+     return c.json({ ok: false, step: "validate", error: msg }, 400);
+   }
++  const project = await getProject(env.DB, input.project);
++  if (!project || !isUsable(project)) {
++    return c.json({ ok: false, step: "project", error: `proyek tidak dikenal atau diarsipkan: ${input.project}` }, 400);
++  }
++  try {
++    for (const p of input.paths) assertAgentPath(p, scopeOf(project));
++  } catch (err) {
++    const msg = err instanceof AgentOutputError ? err.message : "path tidak valid";
++    return c.json({ ok: false, step: "validate", error: msg }, 400);
++  }
+   if (await overDailyLimit(env)) {
+     return c.json({ ok: false, step: "limit", error: `batas harian ${dailyLimit(env)} tugas coding tercapai` }, 429);
+   }
+-  const job = runCodeTask(env, input);
++  const job = runCodeTask(env, input, project);
+   try {
+     c.executionCtx.waitUntil(job.then(() => undefined, () => undefined));
+   } catch {
+@@ -63,6 +75,8 @@ a{color:#58a6ff}.t{border-top:1px solid #30363d;padding:8px 0;font-size:14px}.m{
+ </style></head><body>
+ <h2>Tugas coding agent</h2>
+ <p class="m">AI menulis kode, bot membuat branch <code>agent/...</code> dan Pull Request. Tidak merge. Kamu yang menyetujui.</p>
++<label>Proyek target</label>
++<select id="j"></select>
+ <label>Instruksi (maks ${MAX_INSTRUCTION_CHARS} karakter)</label>
+ <textarea id="i" rows="6"></textarea>
+ <label>File konteks (opsional, satu path per baris, maks 3)</label>
+@@ -76,7 +90,7 @@ function row(t){
+   var s=document.createElement("div");
+   s.textContent=(t.status==="pr_open"?"PR dibuka":t.status==="failed"?"Gagal":"Berjalan")+" - "+new Date(t.created_at).toLocaleString();
+   d.appendChild(s);
+-  var n=document.createElement("div");n.textContent=t.title||t.instruction.slice(0,120);d.appendChild(n);
++  var n=document.createElement("div");n.textContent=(t.project?"["+t.project+"] ":"")+(t.title||t.instruction.slice(0,120));d.appendChild(n);
+   if(t.pr_url){var a=document.createElement("a");a.href=t.pr_url;a.textContent="PR #"+t.pr_number;a.target="_blank";d.appendChild(a);}
+   if(t.error){var e=document.createElement("div");e.className="m";e.textContent=t.error;d.appendChild(e);}
+   if(t.total_tokens!=null){var k=document.createElement("div");k.className="m";k.textContent=t.total_tokens+" token";d.appendChild(k);}
+@@ -88,18 +102,25 @@ async function load(){
+     j.tasks.forEach(function(t){h.appendChild(row(t));});}
+   catch(e){h.textContent="Gagal memuat riwayat";}
+ }
++async function loadProjects(){
++  var s=document.getElementById("j");
++  try{var r=await fetch("/api/projects");var q=await r.json();
++    q.projects.filter(function(x){return x.status!=="archived";}).forEach(function(x){
++      var o=document.createElement("option");o.value=x.name;o.textContent=x.name+" ("+x.repo+")";s.appendChild(o);});}
++  catch(e){s.appendChild(new Option("gagal memuat proyek",""));}
++}
+ document.getElementById("b").onclick=async function(){
+   var b=this,o=document.getElementById("o");
+   var paths=document.getElementById("p").value.split("\\n").map(function(s){return s.trim();}).filter(Boolean);
+   b.disabled=true;o.textContent="Agent bekerja... (bisa 10-40 detik)";
+   try{
+     var r=await fetch("/api/code-tasks",{method:"POST",headers:{"Content-Type":"application/json"},
+-      body:JSON.stringify({instruction:document.getElementById("i").value,paths:paths})});
++      body:JSON.stringify({project:document.getElementById("j").value,instruction:document.getElementById("i").value,paths:paths})});
+     o.textContent=JSON.stringify(await r.json(),null,2);
+   }catch(e){o.textContent="Gagal: "+e;}
+   b.disabled=false;load();
+ };
+-load();
++loadProjects();load();
+ </script></body></html>`;
+ 
+ codeRoutes.get("/page", (c) => c.html(PAGE));
+diff --git a/apps/api/src/phase5/code-task.ts b/apps/api/src/phase5/code-task.ts
+index 0931da9..b72bdae 100644
+--- a/apps/api/src/phase5/code-task.ts
++++ b/apps/api/src/phase5/code-task.ts
+@@ -2,6 +2,7 @@
+ // Agent tidak pernah push ke main dan tidak pernah merge; pemilik yang menyetujui.
+ 
+ import { createProvider, type ChatMessage } from "../phase2/ai";
++import { scopeOf, type Project } from "../phase7/projects";
+ import { AgentOutputError, assertAgentPath, parseAgentOutput } from "./code-parse";
+ import { GithubError, getInstallationToken, type GithubEnv } from "./github-app";
+ import { openPullRequest, readRepoFile } from "./pr";
+@@ -14,6 +15,7 @@ export interface CodeEnv extends GithubEnv {
+ }
+ 
+ export interface CodeTaskInput {
++  project: string; // nama di p7_projects
+   instruction: string;
+   paths: string[];
+ }
+@@ -35,7 +37,7 @@ const MAX_CONTEXT_FILES = 3;
+ const MAX_CONTEXT_CHARS = 12_000;
+ export const MAX_INSTRUCTION_CHARS = 2000;
+ 
+-const SYSTEM_PROMPT = `Kamu Agent Developer untuk monorepo TypeScript: React+Vite di apps/web, Hono di Cloudflare Workers di apps/api, skema bersama di packages/shared.
++const SELF_PROMPT = `Kamu Agent Developer untuk monorepo TypeScript: React+Vite di apps/web, Hono di Cloudflare Workers di apps/api, skema bersama di packages/shared.
+ Tugas: buat atau ubah file sesuai instruksi pemilik. Kode harus lolos typecheck strict dan test vitest.
+ Aturan:
+ - Maksimal 3 file. Hanya path di apps/, packages/, docs/, db/.
+@@ -50,9 +52,26 @@ SUMMARY: <ringkasan satu baris>
+ === END FILE ===
+ (ulangi blok FILE untuk file berikutnya)`;
+ 
++const EXTERNAL_PROMPT = `Kamu Agent Developer untuk proyek web kecil di repo terpisah. Struktur repo bebas; path relatif dari root repo.
++Tugas: buat atau ubah file sesuai instruksi pemilik. Jaga proyek tetap sederhana dan berdiri sendiri.
++Aturan:
++- Maksimal 3 file.
++- Jangan ubah package.json, lockfile, wrangler.jsonc, .github, atau .env.
++- Untuk file yang diubah, tulis ISI LENGKAP file baru (bukan potongan atau diff).
++- Tanpa pagar kode (tiga backtick). Tanpa penjelasan di luar format.
++Format jawaban PERSIS:
++TITLE: <judul singkat satu baris>
++SUMMARY: <ringkasan satu baris>
++=== FILE: path/ke/file ===
++<isi lengkap file>
++=== END FILE ===
++(ulangi blok FILE untuk file berikutnya)`;
++
+ export function validateInput(raw: unknown): CodeTaskInput {
+   if (typeof raw !== "object" || raw === null) throw new AgentOutputError("body harus JSON");
+-  const r = raw as { instruction?: unknown; paths?: unknown };
++  const r = raw as { project?: unknown; instruction?: unknown; paths?: unknown };
++  const project = typeof r.project === "string" ? r.project.trim() : "";
++  if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(project)) throw new AgentOutputError("project wajib diisi (nama proyek)");
+   const instruction = typeof r.instruction === "string" ? r.instruction.trim() : "";
+   if (instruction.length < 10 || instruction.length > MAX_INSTRUCTION_CHARS) {
+     throw new AgentOutputError(`instruksi harus 10-${MAX_INSTRUCTION_CHARS} karakter`);
+@@ -61,8 +80,7 @@ export function validateInput(raw: unknown): CodeTaskInput {
+     ? r.paths.filter((p): p is string => typeof p === "string").map((p) => p.trim()).filter(Boolean)
+     : [];
+   if (paths.length > MAX_CONTEXT_FILES) throw new AgentOutputError(`maksimal ${MAX_CONTEXT_FILES} file konteks`);
+-  for (const p of paths) assertAgentPath(p);
+-  return { instruction, paths };
++  return { project, instruction, paths };
+ }
+ 
+ async function countToday(db: D1Database): Promise<number> {
+@@ -89,13 +107,14 @@ function describeError(err: unknown): { step: string; message: string } {
+   return { step: "unknown", message: "kesalahan tak dikenal" };
+ }
+ 
+-export async function runCodeTask(env: CodeEnv, input: CodeTaskInput): Promise<CodeTaskResult> {
++export async function runCodeTask(env: CodeEnv, input: CodeTaskInput, project: Project): Promise<CodeTaskResult> {
++  const scope = scopeOf(project);
+   const id = crypto.randomUUID();
+   const now = Date.now();
+   await env.DB.prepare(
+-    "INSERT INTO p5_code_tasks (id, instruction, paths, status, created_at, updated_at) VALUES (?, ?, ?, 'running', ?, ?)",
++    "INSERT INTO p5_code_tasks (id, project, instruction, paths, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'running', ?, ?)",
+   )
+-    .bind(id, input.instruction, JSON.stringify(input.paths), now, now)
++    .bind(id, project.name, input.instruction, JSON.stringify(input.paths), now, now)
+     .run();
+ 
+   let tokens: number | null = null;
+@@ -107,18 +126,19 @@ export async function runCodeTask(env: CodeEnv, input: CodeTaskInput): Promise<C
+ 
+     const context: string[] = [];
+     for (const path of input.paths) {
+-      const file = await readRepoFile(token, path, "main");
+-      if (!file) throw new AgentOutputError(`file konteks tidak ada di main: ${path}`);
++      assertAgentPath(path, scope);
++      const file = await readRepoFile(token, project.repo, path, "main");
++      if (!file) throw new AgentOutputError(`file konteks tidak ada di main (${project.repo}): ${path}`);
+       if (file.content.length > MAX_CONTEXT_CHARS) {
+         throw new AgentOutputError(`file konteks terlalu besar (>${MAX_CONTEXT_CHARS} karakter): ${path}`);
+       }
+       context.push(`=== CONTEXT: ${path} ===\n${file.content}\n=== END CONTEXT ===`);
+     }
+     const userMsg =
+-      `Instruksi pemilik:\n${input.instruction}` +
++      `Proyek: ${project.name}\nInstruksi pemilik:\n${input.instruction}` +
+       (context.length ? `\n\nFile konteks (isi saat ini di main):\n${context.join("\n")}` : "");
+     const messages: ChatMessage[] = [
+-      { role: "system", content: SYSTEM_PROMPT },
++      { role: "system", content: scope === "self" ? SELF_PROMPT : EXTERNAL_PROMPT },
+       { role: "user", content: userMsg },
+     ];
+ 
+@@ -127,11 +147,13 @@ export async function runCodeTask(env: CodeEnv, input: CodeTaskInput): Promise<C
+     promptTokens = ai.usage.promptTokens;
+     completionTokens = ai.usage.completionTokens;
+     model = ai.model;
+-    const out = parseAgentOutput(ai.text);
++    const out = parseAgentOutput(ai.text, scope);
+ 
+     const stamp = new Date(now).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "z").toLowerCase();
+     const branch = `agent/code-${stamp}-${id.slice(0, 6)}`;
+     const body = [
++      `Proyek: \`${project.name}\` (${project.repo})`,
++      "",
+       "## Tugas",
+       input.instruction.split("\n").map((l) => `> ${l}`).join("\n"),
+       "",
+@@ -145,6 +167,7 @@ export async function runCodeTask(env: CodeEnv, input: CodeTaskInput): Promise<C
+     ].join("\n");
+ 
+     const pr = await openPullRequest(env, {
++      repo: project.repo,
+       title: `agent: ${out.title}`,
+       body,
+       branch,
+diff --git a/apps/api/src/phase5/github-app.ts b/apps/api/src/phase5/github-app.ts
+index 64c9c04..da4433c 100644
+--- a/apps/api/src/phase5/github-app.ts
++++ b/apps/api/src/phase5/github-app.ts
+@@ -7,6 +7,7 @@ export interface GithubEnv {
+   GITHUB_APP_PRIVATE_KEY: string;
+ }
+ 
++// Repo tes untuk tombol PR tes. Target tugas coding datang dari tabel p7_projects, bukan dari konstanta ini.
+ export const GITHUB_REPO = "baladikarya/101-project";
+ const GITHUB_API = "https://api.github.com";
+ 
+@@ -20,6 +21,12 @@ export class GithubError extends Error {
+   }
+ }
+ 
++export function assertSafeRepo(repo: string): void {
++  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_.-]{1,100}$/.test(repo) || repo.includes("..")) {
++    throw new GithubError("validate", `nama repo tidak valid: ${repo}`);
++  }
++}
++
+ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+   const buf = new ArrayBuffer(bytes.length);
+   new Uint8Array(buf).set(bytes);
+diff --git a/apps/api/src/phase5/github.ts b/apps/api/src/phase5/github.ts
+index 2502cbf..d0582e3 100644
+--- a/apps/api/src/phase5/github.ts
++++ b/apps/api/src/phase5/github.ts
+@@ -1,6 +1,7 @@
+ import { Hono } from "hono";
+ import type { AppEnv } from "../env";
+-import { GITHUB_REPO, GithubError, getInstallationToken, githubGet, type GithubEnv } from "./github-app";
++import { listProjects, isUsable } from "../phase7/projects";
++import { GITHUB_REPO, GithubError, assertSafeRepo, getInstallationToken, githubGet, type GithubEnv } from "./github-app";
+ import { openPullRequest } from "./pr";
+ 
+ interface RepoInfo {
+@@ -11,17 +12,35 @@ interface RepoInfo {
+ 
+ export const githubRoutes = new Hono<AppEnv>();
+ 
+-// Tes koneksi GitHub App. Tidak pernah mengembalikan token.
++// Tes koneksi GitHub App ke setiap repo di p7_projects. Tidak pernah mengembalikan token.
+ githubRoutes.get("/status", async (c) => {
+   const env = c.env as unknown as GithubEnv;
+   try {
+     const inst = await getInstallationToken(env);
+-    const repo = await githubGet<RepoInfo>(inst.token, `/repos/${GITHUB_REPO}`, "repo");
++    const projects = (await listProjects(c.env.DB)).filter(isUsable);
++    const repos = await Promise.all(
++      projects.map(async (p) => {
++        const base = { project: p.name, worker: p.worker, project_status: p.status };
++        try {
++          assertSafeRepo(p.repo);
++          const r = await githubGet<RepoInfo>(inst.token, `/repos/${p.repo}`, "repo");
++          return { ...base, ok: true, repo: r.full_name, private: r.private, default_branch: r.default_branch };
++        } catch (err) {
++          const notFound = err instanceof GithubError && err.status === 404;
++          const msg = err instanceof GithubError ? err.message : "internal_error";
++          return {
++            ...base,
++            ok: false,
++            repo: p.repo,
++            error: notFound ? "repo tidak ada, atau GitHub App belum di-install di repo ini" : msg,
++          };
++        }
++      }),
++    );
+     return c.json({
+-      ok: true,
+-      repo: repo.full_name,
+-      private: repo.private,
+-      default_branch: repo.default_branch,
++      ok: repos.length > 0 && repos.every((r) => r.ok),
++      count: repos.length,
++      repos,
+       permissions: inst.permissions,
+       token_expires_at: inst.expiresAt,
+     });
+@@ -60,6 +79,7 @@ githubRoutes.post("/pr-test", async (c) => {
+   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "z").toLowerCase();
+   try {
+     const pr = await openPullRequest(env, {
++      repo: GITHUB_REPO,
+       title: `Tes PR agent ${stamp}`,
+       body: "PR tes otomatis dari agent (Fase 5). Aman ditutup atau di-merge oleh pemilik.",
+       branch: `agent/test-${stamp}`,
+diff --git a/apps/api/src/phase5/pr.ts b/apps/api/src/phase5/pr.ts
+index d296627..c648b4f 100644
+--- a/apps/api/src/phase5/pr.ts
++++ b/apps/api/src/phase5/pr.ts
+@@ -1,7 +1,7 @@
+ // Fase 5: agent membuat branch terpisah + commit + Pull Request.
+ // Tidak pernah menyentuh main langsung dan tidak pernah merge.
+ 
+-import { GITHUB_REPO, GithubError, getInstallationToken, githubRequest, type GithubEnv } from "./github-app";
++import { GithubError, assertSafeRepo, getInstallationToken, githubRequest, type GithubEnv } from "./github-app";
+ 
+ export interface PrFile {
+   path: string;
+@@ -9,6 +9,7 @@ export interface PrFile {
+ }
+ 
+ export interface PrInput {
++  repo: string; // "pemilik/nama", dipilih dari p7_projects
+   title: string;
+   body: string;
+   branch: string;
+@@ -70,14 +71,16 @@ export function fromBase64Utf8(b64: string): string {
+ // Baca file dari repo. Mengembalikan null kalau file belum ada.
+ export async function readRepoFile(
+   token: string,
++  repo: string,
+   path: string,
+   ref: string,
+ ): Promise<{ content: string; sha: string } | null> {
++  assertSafeRepo(repo);
+   try {
+     const res = await githubRequest<ContentsResponse>(
+       token,
+       "GET",
+-      `/repos/${GITHUB_REPO}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`,
++      `/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`,
+       "read_file",
+     );
+     if (res.type !== "file" || res.encoding !== "base64") {
+@@ -91,13 +94,14 @@ export async function readRepoFile(
+ }
+ 
+ export async function openPullRequest(env: GithubEnv, input: PrInput): Promise<PrResult> {
++  assertSafeRepo(input.repo);
+   assertSafeBranch(input.branch);
+   if (input.files.length === 0) throw new GithubError("validate", "minimal satu file");
+   for (const f of input.files) assertSafePath(f.path);
+   const base = input.base ?? "main";
+ 
+   const token = input.token ?? (await getInstallationToken(env)).token;
+-  const repo = `/repos/${GITHUB_REPO}`;
++  const repo = `/repos/${input.repo}`;
+ 
+   const ref = await githubRequest<{ object: { sha: string } }>(
+     token,
+@@ -110,7 +114,7 @@ export async function openPullRequest(env: GithubEnv, input: PrInput): Promise<P
+     sha: ref.object.sha,
+   });
+   for (const f of input.files) {
+-    const existing = await readRepoFile(token, f.path, input.branch);
++    const existing = await readRepoFile(token, input.repo, f.path, input.branch);
+     await githubRequest(token, "PUT", `${repo}/contents/${encodePath(f.path)}`, "commit_file", {
+       message: `agent: ${input.title}`.slice(0, 200),
+       content: toBase64Utf8(f.content),
+diff --git a/apps/api/src/phase7/projects.ts b/apps/api/src/phase7/projects.ts
+new file mode 100644
+index 0000000..08dfa79
+--- /dev/null
++++ b/apps/api/src/phase7/projects.ts
+@@ -0,0 +1,34 @@
++// Fase 7a: daftar proyek target. Hanya repo di tabel p7_projects yang boleh dibaca/ditulis agent.
++
++import type { PathScope } from "../phase5/code-parse";
++
++export interface Project {
++  id: string;
++  name: string;
++  repo: string;
++  worker: string | null;
++  status: string;
++  kind: "self" | "external";
++  created_at: number;
++  updated_at: number;
++}
++
++const COLS = "id, name, repo, worker, status, kind, created_at, updated_at";
++
++export async function listProjects(db: D1Database): Promise<Project[]> {
++  const { results } = await db.prepare(`SELECT ${COLS} FROM p7_projects ORDER BY created_at, name`).all<Project>();
++  return results;
++}
++
++export async function getProject(db: D1Database, name: string): Promise<Project | null> {
++  if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(name)) return null;
++  return await db.prepare(`SELECT ${COLS} FROM p7_projects WHERE name = ?`).bind(name).first<Project>();
++}
++
++export function isUsable(p: Project): boolean {
++  return p.status !== "archived";
++}
++
++export function scopeOf(p: Project): PathScope {
++  return p.kind === "self" ? "self" : "external";
++}
+diff --git a/apps/api/src/phase7/routes.ts b/apps/api/src/phase7/routes.ts
+new file mode 100644
+index 0000000..18063c9
+--- /dev/null
++++ b/apps/api/src/phase7/routes.ts
+@@ -0,0 +1,8 @@
++import { Hono } from "hono";
++import type { AppEnv } from "../env";
++import { listProjects } from "./projects";
++
++export const projectRoutes = new Hono<AppEnv>();
++
++// Daftar proyek target (tabel p7_projects).
++projectRoutes.get("/", async (c) => c.json({ projects: await listProjects(c.env.DB) }));
+diff --git a/apps/api/src/phase7/scope.test.ts b/apps/api/src/phase7/scope.test.ts
+new file mode 100644
+index 0000000..dbf0b81
+--- /dev/null
++++ b/apps/api/src/phase7/scope.test.ts
+@@ -0,0 +1,64 @@
++import { describe, expect, it } from "vitest";
++import { AgentOutputError, assertAgentPath, parseAgentOutput } from "../phase5/code-parse";
++import { assertSafeRepo } from "../phase5/github-app";
++import { validateInput } from "../phase5/code-task";
++
++describe("path scope external (proyek terpisah)", () => {
++  it("menerima path bebas di root repo", () => {
++    for (const p of ["index.html", "css/style.css", "src/app.ts", ".gitignore"]) {
++      expect(() => assertAgentPath(p, "external"), p).not.toThrow();
++    }
++  });
++
++  it("tetap menolak path berbahaya dan file sensitif", () => {
++    for (const p of [
++      "../x",
++      "/etc/passwd",
++      "a//b",
++      ".github/workflows/ci.yml",
++      ".git/config",
++      "node_modules/x/index.js",
++      "package.json",
++      "sub/package-lock.json",
++      "wrangler.jsonc",
++      ".env",
++      ".env.production",
++      "pnpm-lock.yaml",
++    ]) {
++      expect(() => assertAgentPath(p, "external"), p).toThrow(AgentOutputError);
++    }
++  });
++
++  it("scope self tetap ketat", () => {
++    expect(() => assertAgentPath("index.html")).toThrow(AgentOutputError);
++    expect(() => assertAgentPath("index.html", "self")).toThrow(AgentOutputError);
++  });
++
++  it("parseAgentOutput memakai scope", () => {
++    const text = "TITLE: t\n=== FILE: index.html ===\n<h1>hai</h1>\n=== END FILE ===";
++    expect(() => parseAgentOutput(text)).toThrow(AgentOutputError);
++    expect(parseAgentOutput(text, "external").files[0]?.path).toBe("index.html");
++  });
++});
++
++describe("assertSafeRepo", () => {
++  it("menerima pemilik/nama", () => {
++    expect(() => assertSafeRepo("baladikarya/demo-landing")).not.toThrow();
++  });
++  it("menolak bentuk lain", () => {
++    for (const r of ["demo-landing", "a/b/c", "../x/y", "a/..", "a/b?x=1", " a/b", "a/b#c", ""]) {
++      expect(() => assertSafeRepo(r), r).toThrow();
++    }
++  });
++});
++
++describe("validateInput project", () => {
++  const base = { instruction: "buat halaman landing sederhana", paths: [] };
++  it("project wajib", () => {
++    expect(() => validateInput(base)).toThrow(/project/);
++    expect(() => validateInput({ ...base, project: "../x" })).toThrow(/project/);
++  });
++  it("menerima project valid", () => {
++    expect(validateInput({ ...base, project: "demo-landing" }).project).toBe("demo-landing");
++  });
++});
+diff --git a/apps/api/test/hardening.test.ts b/apps/api/test/hardening.test.ts
+index 114ee9a..ad3649c 100644
+--- a/apps/api/test/hardening.test.ts
++++ b/apps/api/test/hardening.test.ts
+@@ -32,7 +32,7 @@ const req = (path: string, init: RequestInit & { ip?: string } = {}) => {
+ const count = (table: string) => (db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+ 
+ describe("akses tanpa login", () => {
+-  it.each(["/api/audit", "/api/maintenance", "/api/tasks", "/api/runs", "/api/office", "/api/code-tasks", "/api/github/status"])(
++  it.each(["/api/audit", "/api/maintenance", "/api/tasks", "/api/runs", "/api/office", "/api/code-tasks", "/api/github/status", "/api/projects"])(
+     "%s -> 401",
+     async (path) => {
+       const res = await req(path);
+diff --git a/apps/api/test/projects.test.ts b/apps/api/test/projects.test.ts
+new file mode 100644
+index 0000000..eb2b1d7
+--- /dev/null
++++ b/apps/api/test/projects.test.ts
+@@ -0,0 +1,146 @@
++import { generateKeyPairSync } from "node:crypto";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { codeRoutes } from "../src/phase5/code-routes";
++import { githubRoutes } from "../src/phase5/github";
++import { openPullRequest, readRepoFile } from "../src/phase5/pr";
++import { getProject, listProjects } from "../src/phase7/projects";
++import { projectRoutes } from "../src/phase7/routes";
++import { makeD1 } from "./testkit";
++
++let db: ReturnType<typeof makeD1>;
++beforeEach(() => {
++  db = makeD1();
++});
++afterEach(() => vi.unstubAllGlobals());
++
++const json = (body: unknown, status = 200) =>
++  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
++
++describe("p7_projects", () => {
++  it("berisi dua proyek awal", async () => {
++    const list = await listProjects(db as never);
++    expect(list.map((p) => [p.name, p.repo, p.worker, p.status, p.kind])).toEqual([
++      ["101-project", "baladikarya/101-project", "101-project", "active", "self"],
++      ["demo-landing", "baladikarya/demo-landing", "demo-landing", "new", "external"],
++    ]);
++  });
++
++  it("getProject: nama tak dikenal atau tak valid -> null", async () => {
++    expect(await getProject(db as never, "nope")).toBeNull();
++    expect(await getProject(db as never, "x' OR 1=1 --")).toBeNull();
++    expect((await getProject(db as never, "demo-landing"))?.repo).toBe("baladikarya/demo-landing");
++  });
++
++  it("GET /api/projects", async () => {
++    const res = await projectRoutes.request("/", {}, { DB: db } as never);
++    const body = (await res.json()) as { projects: unknown[] };
++    expect(body.projects).toHaveLength(2);
++  });
++});
++
++describe("POST /api/code-tasks memilih proyek", () => {
++  const post = (body: unknown) =>
++    codeRoutes.request(
++      "/",
++      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
++      { DB: db } as never,
++    );
++  const ok = { instruction: "buat halaman landing sederhana", paths: [] };
++
++  it("tanpa project -> 400", async () => {
++    const res = await post(ok);
++    expect(res.status).toBe(400);
++  });
++
++  it("project tak dikenal -> 400 step project", async () => {
++    const res = await post({ ...ok, project: "tidak-ada" });
++    expect(res.status).toBe(400);
++    expect(((await res.json()) as { step: string }).step).toBe("project");
++  });
++
++  it("project diarsipkan -> 400", async () => {
++    db.raw.exec("UPDATE p7_projects SET status='archived' WHERE name='demo-landing'");
++    const res = await post({ ...ok, project: "demo-landing" });
++    expect(res.status).toBe(400);
++  });
++
++  it("path konteks mengikuti scope proyek", async () => {
++    const res = await post({ ...ok, project: "101-project", paths: ["index.html"] });
++    expect(res.status).toBe(400);
++    expect(((await res.json()) as { step: string }).step).toBe("validate");
++  });
++});
++
++describe("PR ke repo pilihan", () => {
++  it("openPullRequest dan readRepoFile memakai repo dari input", async () => {
++    const urls: string[] = [];
++    vi.stubGlobal(
++      "fetch",
++      vi.fn(async (url: string, init?: RequestInit) => {
++        urls.push(`${init?.method ?? "GET"} ${url}`);
++        if (url.includes("/git/ref/heads/")) return json({ object: { sha: "abc" } });
++        if (url.includes("/contents/") && (init?.method ?? "GET") === "GET") return json({ message: "Not Found" }, 404);
++        if (url.endsWith("/pulls")) return json({ number: 7, html_url: "https://github.com/baladikarya/demo-landing/pull/7" });
++        return json({});
++      }),
++    );
++    const pr = await openPullRequest({} as never, {
++      repo: "baladikarya/demo-landing",
++      title: "t",
++      body: "b",
++      branch: "agent/x-1",
++      files: [{ path: "index.html", content: "<h1>x</h1>" }],
++      token: "tok",
++    });
++    expect(pr.number).toBe(7);
++    expect(urls.length).toBeGreaterThan(3);
++    expect(urls.every((u) => u.includes("/repos/baladikarya/demo-landing/"))).toBe(true);
++    expect(urls.some((u) => u.includes("101-project"))).toBe(false);
++    expect(await readRepoFile("tok", "baladikarya/demo-landing", "a.txt", "main")).toBeNull();
++  });
++
++  it("menolak nama repo tidak aman", async () => {
++    await expect(
++      openPullRequest({} as never, { repo: "../x/y", title: "t", body: "b", branch: "agent/x", files: [{ path: "a", content: "" }], token: "t" }),
++    ).rejects.toThrow(/repo/);
++  });
++});
++
++describe("GET /api/github/status", () => {
++  it("menampilkan 2 repo; repo tanpa akses ditandai", async () => {
++    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
++    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
++    vi.stubGlobal(
++      "fetch",
++      vi.fn(async (url: string) => {
++        if (url.includes("/access_tokens")) {
++          return json({ token: "t", expires_at: "2099-01-01T00:00:00Z", permissions: { contents: "write" } });
++        }
++        if (url.endsWith("/repos/baladikarya/101-project")) {
++          return json({ full_name: "baladikarya/101-project", private: false, default_branch: "main" });
++        }
++        return json({ message: "Not Found" }, 404);
++      }),
++    );
++    const env = { DB: db, GITHUB_APP_ID: "1", GITHUB_APP_INSTALLATION_ID: "2", GITHUB_APP_PRIVATE_KEY: pem };
++    const res = await githubRoutes.request("/status", {}, env as never);
++    expect(res.status).toBe(200);
++    const body = (await res.json()) as { ok: boolean; count: number; repos: { project: string; ok: boolean; error?: string }[] };
++    expect(body.count).toBe(2);
++    expect(body.ok).toBe(false);
++    expect(body.repos.find((r) => r.project === "101-project")?.ok).toBe(true);
++    expect(body.repos.find((r) => r.project === "demo-landing")?.error).toMatch(/di-install/);
++    expect(JSON.stringify(body)).not.toContain('"token"');
++
++    vi.stubGlobal(
++      "fetch",
++      vi.fn(async (url: string) =>
++        url.includes("/access_tokens")
++          ? json({ token: "t", expires_at: "2099-01-01T00:00:00Z", permissions: {} })
++          : json({ full_name: url.split("/repos/")[1], private: true, default_branch: "main" }),
++      ),
++    );
++    const ok = (await (await githubRoutes.request("/status", {}, env as never)).json()) as { ok: boolean; count: number };
++    expect(ok).toMatchObject({ ok: true, count: 2 });
++  });
++});
+diff --git a/db/migrations/0700_phase7a.sql b/db/migrations/0700_phase7a.sql
+new file mode 100644
+index 0000000..62ec7f9
+--- /dev/null
++++ b/db/migrations/0700_phase7a.sql
+@@ -0,0 +1,19 @@
++-- Fase 7a: proyek target terpisah. Agent hanya boleh menyentuh repo yang terdaftar di sini.
++CREATE TABLE IF NOT EXISTS p7_projects (
++  id TEXT PRIMARY KEY,
++  name TEXT NOT NULL UNIQUE,
++  repo TEXT NOT NULL UNIQUE,
++  worker TEXT,
++  status TEXT NOT NULL DEFAULT 'new',
++  kind TEXT NOT NULL DEFAULT 'external',
++  created_at INTEGER NOT NULL,
++  updated_at INTEGER NOT NULL
++);
++
++INSERT OR IGNORE INTO p7_projects (id, name, repo, worker, status, kind, created_at, updated_at) VALUES
++  ('101-project', '101-project', 'baladikarya/101-project', '101-project', 'active', 'self',
++   CAST(strftime('%s','now') AS INTEGER) * 1000, CAST(strftime('%s','now') AS INTEGER) * 1000),
++  ('demo-landing', 'demo-landing', 'baladikarya/demo-landing', 'demo-landing', 'new', 'external',
++   CAST(strftime('%s','now') AS INTEGER) * 1000, CAST(strftime('%s','now') AS INTEGER) * 1000);
++
++ALTER TABLE p5_code_tasks ADD COLUMN project TEXT;
