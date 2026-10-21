@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../env";
-import { clientId } from "./rate-limit";
+import { clientId, repeatRejections } from "./rate-limit";
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -27,6 +27,8 @@ export const auditMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
   const path = c.req.path.slice(0, 200);
   const status = c.res.status;
   if (!shouldAudit(method, path, status)) return;
+  // Penolakan 429 berulang dari klien yang sama cukup tercatat sekali per jendela.
+  if (repeatRejections.has(c.req.raw)) return;
 
   const actor = c.get("user")?.login ?? null;
   const ip = clientId(c.req.header("CF-Connecting-IP"));

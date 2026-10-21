@@ -1,6 +1,9 @@
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../env";
 
+/** Request yang ditolak berulang kali dalam satu jendela; tidak perlu dicatat lagi di audit (cegah banjir tulis D1). */
+export const repeatRejections = new WeakSet<Request>();
+
 /** Awal jendela waktu (detik) tempat `nowSec` berada. */
 export function windowStartSec(nowSec: number, windowSec: number): number {
   return Math.floor(nowSec / windowSec) * windowSec;
@@ -51,6 +54,7 @@ export function rateLimit(opts: RateLimitOptions): MiddlewareHandler<AppEnv> {
     c.header("X-RateLimit-Remaining", String(Math.max(0, opts.limit - count)));
 
     if (count > opts.limit) {
+      if (count > opts.limit + 1) repeatRejections.add(c.req.raw);
       const retryAfterSec = Math.max(1, ws + opts.windowSec - nowSec);
       c.header("Retry-After", String(retryAfterSec));
       return c.json({ error: "rate_limited", retryAfterSec }, 429);

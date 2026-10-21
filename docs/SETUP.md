@@ -1,4 +1,8 @@
-# Setup dan Deploy — Fase 1
+# Setup dan Deploy
+
+> Nama di panduan ini (`ai-virtual-office`) adalah nama bawaan. Pada instalasi pemilik, repo dan Worker bernama `101-project`; database tetap `ai-virtual-office-db`. Pakai nama Anda sendiri secara konsisten.
+
+# Fase 1
 
 Target: website online di `https://ai-virtual-office.<subdomain-kamu>.workers.dev`, bisa dibuka dari HP, login GitHub, terhubung ke D1.
 
@@ -87,7 +91,7 @@ OAuth App lokal memakai callback `http://localhost:8787/api/auth/github/callback
 - Single Owner Mode: akun pertama yang cocok dengan `OWNER_GITHUB_LOGIN` menjadi pemilik; akun lain ditolak dan dicatat di `audit_logs`.
 - Sesi: token acak 256-bit, hanya hash SHA-256 yang disimpan di D1; cookie `HttpOnly`, `SameSite=Lax`, `Secure` di HTTPS, masa berlaku 30 hari.
 - CSRF: request yang mengubah data wajib berasal dari origin yang sama.
-- Belum ada rate limiting; itu bagian Fase 6.
+- Rate limiting, audit log lengkap, dan retensi data ditambahkan di Fase 6; lihat [SECURITY.md](SECURITY.md).
 
 ## Fase 2 — AI Manager pertama (Groq + Cloudflare Workflows)
 
@@ -107,12 +111,45 @@ Catatan perilaku:
 - Retry membuat instance Workflow baru; maksimal 5 percobaan per tugas. Error 429/5xx dari Groq dicoba ulang otomatis 3x; 400/401/403/404 langsung gagal.
 - Batas harian tugas melindungi kuota gratis (Free Tier Only).
 
+## Fase 3 — Tim multi-agent
+
+1. **D1**: jalankan `db/migrations/0003_phase3.sql` di tab Console (tabel berawalan `p3_`).
+2. Deploy lewat `main`. Buka tab **Tim**, pilih alur standar (Analyst → Architect → Backend → QA), kirim.
+3. Langkah yang butuh persetujuan berhenti di status menunggu sampai Anda menyetujuinya.
+
+## Fase 4 — Kantor 3D
+
+Tidak ada SQL baru. Tab **Kantor** menampilkan status agent dari database (`GET /api/office`). Bila perangkat lambat, nyalakan **Low Graphics** atau pakai tampilan 2D; bila WebGL gagal, aplikasi kembali ke 2D otomatis.
+
+## Fase 5 — Agent coding dan Pull Request
+
+1. **GitHub App** (izin minimum: contents write, pull requests write, actions read, metadata read), pasang hanya di repo ini.
+2. **Secret** Worker: `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`.
+3. **D1**: jalankan `db/migrations/0500_p5_code_tasks.sql`.
+4. Cloudflare → Worker → Settings → Builds: matikan **Builds for Preview branches** (agar branch `agent/*` tidak men-deploy preview).
+5. GitHub → Settings → Rules: ruleset `protect-main` (wajib PR, wajib check `test`, tanpa force push dan hapus branch).
+6. GitHub → Settings → Actions → General: aktifkan **Allow GitHub Actions to create and approve pull requests**.
+
+Agent tidak pernah push ke `main`. PR dari bot butuh klik **Approve workflows to run** sebelum CI jalan.
+
+## Fase 6 — Hardening
+
+1. **D1**: jalankan `db/migrations/0600_phase6.sql` (tiga tabel `p6_`, idempoten).
+2. Deploy lewat `main`. Tidak ada secret atau variabel baru.
+3. Cek dari ponsel (sudah login):
+   - `/api/audit` → daftar jejak audit terbaru.
+   - `/api/maintenance` → status pembersihan dan jumlah baris.
+   - Header `X-RateLimit-Limit` ada di respons API.
+
+Detail batas dan retensi: [SECURITY.md](SECURITY.md).
+
 ## Menerapkan perubahan kode (apply-patch)
 
-Perubahan kode dikirim sebagai file `change.patch`. Workflow `.github/workflows/apply-patch.yml` menerapkannya:
+Perubahan kode dikirim sebagai file `change.patch`. Workflow `.github/workflows/apply-patch.yml` menerapkannya lewat Pull Request:
 
 1. Upload `change.patch` ke root repo (nama harus persis itu).
 2. **Actions → Apply patch → Run workflow**, isi pesan commit.
-3. Patch diterapkan, lalu typecheck, tes, dan build dijalankan. Commit ke `main` hanya jika semuanya lulus, dan `change.patch` terhapus otomatis.
+3. Workflow membuat branch `patch/run-<id>` dan membuka PR, lalu menjalankan CI.
+4. Klik **Approve workflows to run** bila diminta, tunggu check `test` hijau, lalu **Squash and merge**.
 
 Patch yang menyentuh `.github/` ditolak (token Actions tidak boleh mengubah workflow); ubah file itu manual.
