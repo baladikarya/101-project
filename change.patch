@@ -1,0 +1,124 @@
+diff --git a/apps/api/src/phase6/cleanup.test.ts b/apps/api/src/phase6/cleanup.test.ts
+index 5178151..0642002 100644
+--- a/apps/api/src/phase6/cleanup.test.ts
++++ b/apps/api/src/phase6/cleanup.test.ts
+@@ -1,5 +1,12 @@
+ import { describe, expect, it } from "vitest";
+-import { AUDIT_RETENTION_MS, RATE_LIMIT_RETENTION_SEC, cutoffs } from "./cleanup";
++import {
++  AUDIT_RETENTION_MS,
++  EVENTS_RETENTION_MS,
++  RATE_LIMIT_RETENTION_SEC,
++  USAGE_RETENTION_MS,
++  cutoffs,
++  msExpr,
++} from "./cleanup";
+ 
+ describe("cutoffs", () => {
+   it("menghitung batas hapus dari waktu sekarang", () => {
+@@ -12,3 +19,22 @@ describe("cutoffs", () => {
+     expect(AUDIT_RETENTION_MS).toBe(90 * 86_400_000);
+   });
+ });
++
++describe("retensi tabel lama", () => {
++  it("event 30 hari, usage 90 hari", () => {
++    const now = 1_800_000_000_000;
++    const c = cutoffs(now);
++    expect(c.eventsBeforeMs).toBe(now - EVENTS_RETENTION_MS);
++    expect(c.usageBeforeMs).toBe(now - USAGE_RETENTION_MS);
++    expect(EVENTS_RETENTION_MS).toBe(30 * 86_400_000);
++    expect(USAGE_RETENTION_MS).toBe(90 * 86_400_000);
++  });
++});
++
++describe("msExpr", () => {
++  it("menormalkan detik dan milidetik ke milidetik", () => {
++    const e = msExpr("created_at");
++    expect(e).toContain("created_at > 100000000000");
++    expect(e).toContain("created_at * 1000");
++  });
++});
+diff --git a/apps/api/src/phase6/cleanup.ts b/apps/api/src/phase6/cleanup.ts
+index 1855d34..c4e5b19 100644
+--- a/apps/api/src/phase6/cleanup.ts
++++ b/apps/api/src/phase6/cleanup.ts
+@@ -4,29 +4,68 @@ import type { AppEnv } from "../env";
+ 
+ export const RATE_LIMIT_RETENTION_SEC = 60 * 60; // 1 jam
+ export const AUDIT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000; // 90 hari
++export const EVENTS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 hari
++export const USAGE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000; // 90 hari
+ export const CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // paling sering tiap 12 jam
+ 
+ const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+ 
+-export function cutoffs(nowMs: number): { rateLimitBeforeSec: number; auditBeforeMs: number } {
++export function cutoffs(nowMs: number): {
++  rateLimitBeforeSec: number;
++  auditBeforeMs: number;
++  eventsBeforeMs: number;
++  usageBeforeMs: number;
++  nowMs: number;
++} {
+   return {
+     rateLimitBeforeSec: Math.floor(nowMs / 1000) - RATE_LIMIT_RETENTION_SEC,
+     auditBeforeMs: nowMs - AUDIT_RETENTION_MS,
++    eventsBeforeMs: nowMs - EVENTS_RETENTION_MS,
++    usageBeforeMs: nowMs - USAGE_RETENTION_MS,
++    nowMs,
+   };
+ }
+ 
++/** Kolom waktu tabel lama bisa detik atau milidetik; bandingkan selalu dalam milidetik. */
++export function msExpr(col: string): string {
++  return `(CASE WHEN ${col} > 100000000000 THEN ${col} ELSE ${col} * 1000 END)`;
++}
++
+ export interface CleanupResult {
+   rateLimitsDeleted: number;
+   auditDeleted: number;
++  legacy: Record<string, number>;
+ }
+ 
+ export async function runCleanup(db: D1Database, nowMs: number): Promise<CleanupResult> {
+   const c = cutoffs(nowMs);
+   const rl = await db.prepare("DELETE FROM p6_rate_limits WHERE window_start < ?1").bind(c.rateLimitBeforeSec).run();
+   const au = await db.prepare("DELETE FROM p6_audit_log WHERE ts < ?1").bind(c.auditBeforeMs).run();
++
++  // Tabel lama: tiap penghapusan berdiri sendiri, satu gagal tidak menghentikan yang lain.
++  const legacyJobs: Array<[string, string, number]> = [
++    ["sessions", `DELETE FROM sessions WHERE ${msExpr("expires_at")} < ?1`, c.nowMs],
++    ["audit_logs", `DELETE FROM audit_logs WHERE ${msExpr("ts")} < ?1`, c.auditBeforeMs],
++    ["p2_task_events", `DELETE FROM p2_task_events WHERE ${msExpr("created_at")} < ?1`, c.eventsBeforeMs],
++    ["p3_events", `DELETE FROM p3_events WHERE ${msExpr("created_at")} < ?1`, c.eventsBeforeMs],
++    ["p2_usage_logs", `DELETE FROM p2_usage_logs WHERE ${msExpr("created_at")} < ?1`, c.usageBeforeMs],
++    ["p3_usage_logs", `DELETE FROM p3_usage_logs WHERE ${msExpr("created_at")} < ?1`, c.usageBeforeMs],
++  ];
++  const legacy: Record<string, number> = {};
++  for (const [name, sql, bound] of legacyJobs) {
++    try {
++      const r = await db.prepare(sql).bind(bound).run();
++      legacy[name] = r.meta?.changes ?? 0;
++    } catch (err) {
++      console.error(`cleanup: ${name} gagal`, err);
++      legacy[name] = -1;
++    }
++  }
++
+   return {
+     rateLimitsDeleted: rl.meta?.changes ?? 0,
+     auditDeleted: au.meta?.changes ?? 0,
++    legacy,
+   };
+ }
+ 
+@@ -79,6 +118,8 @@ maintenanceRoutes.get("/", async (c) => {
+     retention: {
+       rateLimitSec: RATE_LIMIT_RETENTION_SEC,
+       auditDays: AUDIT_RETENTION_MS / 86_400_000,
++      eventsDays: EVENTS_RETENTION_MS / 86_400_000,
++      usageDays: USAGE_RETENTION_MS / 86_400_000,
+       intervalHours: CLEANUP_INTERVAL_MS / 3_600_000,
+     },
+   });
