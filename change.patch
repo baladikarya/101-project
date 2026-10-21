@@ -1,0 +1,143 @@
+diff --git a/apps/api/src/index.ts b/apps/api/src/index.ts
+index 596ba43..da18dfc 100644
+--- a/apps/api/src/index.ts
++++ b/apps/api/src/index.ts
+@@ -8,6 +8,7 @@ import { officeRoutes } from "./phase4/office";
+ import { codeRoutes } from "./phase5/code-routes";
+ import { githubRoutes } from "./phase5/github";
+ import { auditMiddleware, auditRoutes } from "./phase6/audit";
++import { cleanupMiddleware, maintenanceRoutes } from "./phase6/cleanup";
+ import { rateLimit } from "./phase6/rate-limit";
+ import { isSameOrigin } from "./util";
+ 
+@@ -22,6 +23,9 @@ app.use("/api/*", secureHeaders());
+ // Fase 6: audit log (dipasang awal agar penolakan CSRF/rate limit ikut tercatat).
+ app.use("/api/*", auditMiddleware);
+ 
++// Fase 6: pembersihan data malas (dipicu request tulis).
++app.use("/api/*", cleanupMiddleware);
++
+ // CSRF: request yang mengubah data wajib berasal dari origin yang sama.
+ app.use("/api/*", async (c, next) => {
+   const method = c.req.method;
+@@ -88,6 +92,9 @@ app.route("/api/code-tasks", codeRoutes);
+ app.use("/api/audit", requireUser);
+ app.use("/api/audit/*", requireUser);
+ app.route("/api/audit", auditRoutes);
++app.use("/api/maintenance", requireUser);
++app.use("/api/maintenance/*", requireUser);
++app.route("/api/maintenance", maintenanceRoutes);
+ 
+ app.notFound((c) => c.json({ error: "not_found" }, 404));
+ app.onError((err, c) => {
+diff --git a/apps/api/src/phase6/cleanup.test.ts b/apps/api/src/phase6/cleanup.test.ts
+new file mode 100644
+index 0000000..5178151
+--- /dev/null
++++ b/apps/api/src/phase6/cleanup.test.ts
+@@ -0,0 +1,14 @@
++import { describe, expect, it } from "vitest";
++import { AUDIT_RETENTION_MS, RATE_LIMIT_RETENTION_SEC, cutoffs } from "./cleanup";
++
++describe("cutoffs", () => {
++  it("menghitung batas hapus dari waktu sekarang", () => {
++    const now = 1_800_000_000_000;
++    const c = cutoffs(now);
++    expect(c.rateLimitBeforeSec).toBe(now / 1000 - RATE_LIMIT_RETENTION_SEC);
++    expect(c.auditBeforeMs).toBe(now - AUDIT_RETENTION_MS);
++  });
++  it("audit disimpan 90 hari", () => {
++    expect(AUDIT_RETENTION_MS).toBe(90 * 86_400_000);
++  });
++});
+diff --git a/apps/api/src/phase6/cleanup.ts b/apps/api/src/phase6/cleanup.ts
+new file mode 100644
+index 0000000..1855d34
+--- /dev/null
++++ b/apps/api/src/phase6/cleanup.ts
+@@ -0,0 +1,85 @@
++import { Hono } from "hono";
++import type { MiddlewareHandler } from "hono";
++import type { AppEnv } from "../env";
++
++export const RATE_LIMIT_RETENTION_SEC = 60 * 60; // 1 jam
++export const AUDIT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000; // 90 hari
++export const CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // paling sering tiap 12 jam
++
++const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
++
++export function cutoffs(nowMs: number): { rateLimitBeforeSec: number; auditBeforeMs: number } {
++  return {
++    rateLimitBeforeSec: Math.floor(nowMs / 1000) - RATE_LIMIT_RETENTION_SEC,
++    auditBeforeMs: nowMs - AUDIT_RETENTION_MS,
++  };
++}
++
++export interface CleanupResult {
++  rateLimitsDeleted: number;
++  auditDeleted: number;
++}
++
++export async function runCleanup(db: D1Database, nowMs: number): Promise<CleanupResult> {
++  const c = cutoffs(nowMs);
++  const rl = await db.prepare("DELETE FROM p6_rate_limits WHERE window_start < ?1").bind(c.rateLimitBeforeSec).run();
++  const au = await db.prepare("DELETE FROM p6_audit_log WHERE ts < ?1").bind(c.auditBeforeMs).run();
++  return {
++    rateLimitsDeleted: rl.meta?.changes ?? 0,
++    auditDeleted: au.meta?.changes ?? 0,
++  };
++}
++
++/** Klaim giliran bersih-bersih secara atomik: hanya satu request yang menang per interval. */
++async function claimCleanup(db: D1Database, nowMs: number): Promise<boolean> {
++  const row = await db
++    .prepare(
++      "INSERT INTO p6_meta (key, value) VALUES ('last_cleanup', ?1) " +
++        "ON CONFLICT(key) DO UPDATE SET value = ?1 WHERE value < ?2 RETURNING value",
++    )
++    .bind(nowMs, nowMs - CLEANUP_INTERVAL_MS)
++    .first();
++  return row !== null;
++}
++
++/** Pembersihan malas: dipicu request tulis, berjalan di latar belakang, tanpa Cron/konfigurasi tambahan. */
++export const cleanupMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
++  await next();
++  if (!MUTATING.has(c.req.method)) return;
++
++  const job = (async () => {
++    try {
++      const now = Date.now();
++      if (!(await claimCleanup(c.env.DB, now))) return;
++      const r = await runCleanup(c.env.DB, now);
++      console.log("cleanup", JSON.stringify(r));
++    } catch (err) {
++      console.error("cleanup: error", err);
++    }
++  })();
++
++  try {
++    c.executionCtx.waitUntil(job);
++  } catch {
++    await job;
++  }
++};
++
++/** GET /api/maintenance — status pembersihan (khusus pemilik). */
++export const maintenanceRoutes = new Hono<AppEnv>();
++
++maintenanceRoutes.get("/", async (c) => {
++  const db = c.env.DB;
++  const meta = await db.prepare("SELECT value FROM p6_meta WHERE key = 'last_cleanup'").first<{ value: number }>();
++  const rl = await db.prepare("SELECT COUNT(*) AS n FROM p6_rate_limits").first<{ n: number }>();
++  const au = await db.prepare("SELECT COUNT(*) AS n FROM p6_audit_log").first<{ n: number }>();
++  return c.json({
++    lastCleanup: meta?.value ?? null,
++    rows: { rateLimits: rl?.n ?? 0, audit: au?.n ?? 0 },
++    retention: {
++      rateLimitSec: RATE_LIMIT_RETENTION_SEC,
++      auditDays: AUDIT_RETENTION_MS / 86_400_000,
++      intervalHours: CLEANUP_INTERVAL_MS / 3_600_000,
++    },
++  });
++});
