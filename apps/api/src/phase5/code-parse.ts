@@ -15,7 +15,13 @@ const DENY_PREFIXES = ["apps/api/src/phase5/"];
 const DENY_FILES = new Set(["apps/api/src/auth.ts"]);
 const DENY_BASENAMES = new Set(["package.json", "package-lock.json", "wrangler.jsonc"]);
 
-export function assertAgentPath(path: string): void {
+// "self" = repo platform ini (aturan ketat). "external" = proyek terpisah di p7_projects.
+export type PathScope = "self" | "external";
+
+const EXTERNAL_DENY_PREFIXES = [".github/", ".git/", "node_modules/"];
+const EXTERNAL_DENY_BASENAMES = new Set(["yarn.lock", "pnpm-lock.yaml", ".gitmodules"]);
+
+export function assertAgentPath(path: string, scope: PathScope = "self"): void {
   const segs = path.split("/");
   const malformed =
     path.length === 0 ||
@@ -24,10 +30,19 @@ export function assertAgentPath(path: string): void {
     path.includes("\\") ||
     segs.some((s) => s === "" || s === "." || s === "..");
   if (malformed) throw new AgentOutputError(`path tidak aman: ${path}`);
+  const base = segs[segs.length - 1] ?? "";
+  if (scope === "external") {
+    const denied =
+      EXTERNAL_DENY_PREFIXES.some((p) => path.startsWith(p)) ||
+      DENY_BASENAMES.has(base) ||
+      EXTERNAL_DENY_BASENAMES.has(base) ||
+      base.startsWith(".env");
+    if (denied) throw new AgentOutputError(`file terlarang untuk agent: ${path}`);
+    return;
+  }
   if (!ALLOWED_PREFIXES.some((p) => path.startsWith(p))) {
     throw new AgentOutputError(`path di luar apps/, packages/, docs/, db/: ${path}`);
   }
-  const base = segs[segs.length - 1] ?? "";
   if (DENY_BASENAMES.has(base) || base.startsWith(".env")) {
     throw new AgentOutputError(`file terlarang untuk agent: ${path}`);
   }
@@ -47,7 +62,7 @@ function stripFence(s: string): string {
   return m?.[1] ?? s;
 }
 
-export function parseAgentOutput(text: string): AgentOutput {
+export function parseAgentOutput(text: string, scope: PathScope = "self"): AgentOutput {
   const title = /^TITLE:[ \t]*(.+)$/m.exec(text)?.[1]?.trim().slice(0, 100);
   if (!title) throw new AgentOutputError("jawaban AI tanpa baris TITLE");
   const summary = (/^SUMMARY:[ \t]*(.+)$/m.exec(text)?.[1] ?? "").trim().slice(0, 500);
@@ -57,7 +72,7 @@ export function parseAgentOutput(text: string): AgentOutput {
   const seen = new Set<string>();
   for (const m of text.matchAll(re)) {
     const path = (m[1] ?? "").trim();
-    assertAgentPath(path);
+    assertAgentPath(path, scope);
     if (seen.has(path)) throw new AgentOutputError(`file ganda: ${path}`);
     seen.add(path);
     const content = `${stripFence(m[2] ?? "").replace(/\r\n/g, "\n")}\n`;

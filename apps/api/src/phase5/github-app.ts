@@ -7,6 +7,7 @@ export interface GithubEnv {
   GITHUB_APP_PRIVATE_KEY: string;
 }
 
+// Repo tes untuk tombol PR tes. Target tugas coding datang dari tabel p7_projects, bukan dari konstanta ini.
 export const GITHUB_REPO = "baladikarya/101-project";
 const GITHUB_API = "https://api.github.com";
 
@@ -17,6 +18,12 @@ export class GithubError extends Error {
     super(message);
     this.step = step;
     this.status = status;
+  }
+}
+
+export function assertSafeRepo(repo: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_.-]{1,100}$/.test(repo) || repo.includes("..")) {
+    throw new GithubError("validate", `nama repo tidak valid: ${repo}`);
   }
 }
 

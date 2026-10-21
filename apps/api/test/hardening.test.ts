@@ -32,7 +32,7 @@ const req = (path: string, init: RequestInit & { ip?: string } = {}) => {
 const count = (table: string) => (db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 
 describe("akses tanpa login", () => {
-  it.each(["/api/audit", "/api/maintenance", "/api/tasks", "/api/runs", "/api/office", "/api/code-tasks", "/api/github/status"])(
+  it.each(["/api/audit", "/api/maintenance", "/api/tasks", "/api/runs", "/api/office", "/api/code-tasks", "/api/github/status", "/api/projects"])(
     "%s -> 401",
     async (path) => {
       const res = await req(path);

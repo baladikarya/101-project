@@ -1,7 +1,7 @@
 // Fase 5: agent membuat branch terpisah + commit + Pull Request.
 // Tidak pernah menyentuh main langsung dan tidak pernah merge.
 
-import { GITHUB_REPO, GithubError, getInstallationToken, githubRequest, type GithubEnv } from "./github-app";
+import { GithubError, assertSafeRepo, getInstallationToken, githubRequest, type GithubEnv } from "./github-app";
 
 export interface PrFile {
   path: string;
@@ -9,6 +9,7 @@ export interface PrFile {
 }
 
 export interface PrInput {
+  repo: string; // "pemilik/nama", dipilih dari p7_projects
   title: string;
   body: string;
   branch: string;
@@ -70,14 +71,16 @@ export function fromBase64Utf8(b64: string): string {
 // Baca file dari repo. Mengembalikan null kalau file belum ada.
 export async function readRepoFile(
   token: string,
+  repo: string,
   path: string,
   ref: string,
 ): Promise<{ content: string; sha: string } | null> {
+  assertSafeRepo(repo);
   try {
     const res = await githubRequest<ContentsResponse>(
       token,
       "GET",
-      `/repos/${GITHUB_REPO}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`,
+      `/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`,
       "read_file",
     );
     if (res.type !== "file" || res.encoding !== "base64") {
@@ -91,13 +94,14 @@ export async function readRepoFile(
 }
 
 export async function openPullRequest(env: GithubEnv, input: PrInput): Promise<PrResult> {
+  assertSafeRepo(input.repo);
   assertSafeBranch(input.branch);
   if (input.files.length === 0) throw new GithubError("validate", "minimal satu file");
   for (const f of input.files) assertSafePath(f.path);
   const base = input.base ?? "main";
 
   const token = input.token ?? (await getInstallationToken(env)).token;
-  const repo = `/repos/${GITHUB_REPO}`;
+  const repo = `/repos/${input.repo}`;
 
   const ref = await githubRequest<{ object: { sha: string } }>(
     token,
@@ -110,7 +114,7 @@ export async function openPullRequest(env: GithubEnv, input: PrInput): Promise<P
     sha: ref.object.sha,
   });
   for (const f of input.files) {
-    const existing = await readRepoFile(token, f.path, input.branch);
+    const existing = await readRepoFile(token, input.repo, f.path, input.branch);
     await githubRequest(token, "PUT", `${repo}/contents/${encodePath(f.path)}`, "commit_file", {
       message: `agent: ${input.title}`.slice(0, 200),
       content: toBase64Utf8(f.content),

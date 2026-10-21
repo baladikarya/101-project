@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
-import { GITHUB_REPO, GithubError, getInstallationToken, githubGet, type GithubEnv } from "./github-app";
+import { listProjects, isUsable } from "../phase7/projects";
+import { GITHUB_REPO, GithubError, assertSafeRepo, getInstallationToken, githubGet, type GithubEnv } from "./github-app";
 import { openPullRequest } from "./pr";
 
 interface RepoInfo {
@@ -11,17 +12,35 @@ interface RepoInfo {
 
 export const githubRoutes = new Hono<AppEnv>();
 
-// Tes koneksi GitHub App. Tidak pernah mengembalikan token.
+// Tes koneksi GitHub App ke setiap repo di p7_projects. Tidak pernah mengembalikan token.
 githubRoutes.get("/status", async (c) => {
   const env = c.env as unknown as GithubEnv;
   try {
     const inst = await getInstallationToken(env);
-    const repo = await githubGet<RepoInfo>(inst.token, `/repos/${GITHUB_REPO}`, "repo");
+    const projects = (await listProjects(c.env.DB)).filter(isUsable);
+    const repos = await Promise.all(
+      projects.map(async (p) => {
+        const base = { project: p.name, worker: p.worker, project_status: p.status };
+        try {
+          assertSafeRepo(p.repo);
+          const r = await githubGet<RepoInfo>(inst.token, `/repos/${p.repo}`, "repo");
+          return { ...base, ok: true, repo: r.full_name, private: r.private, default_branch: r.default_branch };
+        } catch (err) {
+          const notFound = err instanceof GithubError && err.status === 404;
+          const msg = err instanceof GithubError ? err.message : "internal_error";
+          return {
+            ...base,
+            ok: false,
+            repo: p.repo,
+            error: notFound ? "repo tidak ada, atau GitHub App belum di-install di repo ini" : msg,
+          };
+        }
+      }),
+    );
     return c.json({
-      ok: true,
-      repo: repo.full_name,
-      private: repo.private,
-      default_branch: repo.default_branch,
+      ok: repos.length > 0 && repos.every((r) => r.ok),
+      count: repos.length,
+      repos,
       permissions: inst.permissions,
       token_expires_at: inst.expiresAt,
     });
@@ -60,6 +79,7 @@ githubRoutes.post("/pr-test", async (c) => {
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "z").toLowerCase();
   try {
     const pr = await openPullRequest(env, {
+      repo: GITHUB_REPO,
       title: `Tes PR agent ${stamp}`,
       body: "PR tes otomatis dari agent (Fase 5). Aman ditutup atau di-merge oleh pemilik.",
       branch: `agent/test-${stamp}`,

@@ -10,6 +10,7 @@ import { githubRoutes } from "./phase5/github";
 import { auditMiddleware, auditRoutes } from "./phase6/audit";
 import { cleanupMiddleware, maintenanceRoutes } from "./phase6/cleanup";
 import { rateLimit } from "./phase6/rate-limit";
+import { projectRoutes } from "./phase7/routes";
 import { isSameOrigin } from "./util";
 
 // Cloudflare Workflows: class harus diekspor dari entry Worker.
@@ -95,6 +96,11 @@ app.route("/api/audit", auditRoutes);
 app.use("/api/maintenance", requireUser);
 app.use("/api/maintenance/*", requireUser);
 app.route("/api/maintenance", maintenanceRoutes);
+
+// Fase 7a: daftar proyek target (khusus pemilik).
+app.use("/api/projects", requireUser);
+app.use("/api/projects/*", requireUser);
+app.route("/api/projects", projectRoutes);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {
