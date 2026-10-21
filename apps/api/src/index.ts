@@ -8,6 +8,7 @@ import { officeRoutes } from "./phase4/office";
 import { codeRoutes } from "./phase5/code-routes";
 import { githubRoutes } from "./phase5/github";
 import { auditMiddleware, auditRoutes } from "./phase6/audit";
+import { cleanupMiddleware, maintenanceRoutes } from "./phase6/cleanup";
 import { rateLimit } from "./phase6/rate-limit";
 import { isSameOrigin } from "./util";
 
@@ -21,6 +22,9 @@ app.use("/api/*", secureHeaders());
 
 // Fase 6: audit log (dipasang awal agar penolakan CSRF/rate limit ikut tercatat).
 app.use("/api/*", auditMiddleware);
+
+// Fase 6: pembersihan data malas (dipicu request tulis).
+app.use("/api/*", cleanupMiddleware);
 
 // CSRF: request yang mengubah data wajib berasal dari origin yang sama.
 app.use("/api/*", async (c, next) => {
@@ -88,6 +92,9 @@ app.route("/api/code-tasks", codeRoutes);
 app.use("/api/audit", requireUser);
 app.use("/api/audit/*", requireUser);
 app.route("/api/audit", auditRoutes);
+app.use("/api/maintenance", requireUser);
+app.use("/api/maintenance/*", requireUser);
+app.route("/api/maintenance", maintenanceRoutes);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {
