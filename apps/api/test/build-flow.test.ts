@@ -9,6 +9,7 @@ let env: Env;
 let ghCalls: string[];
 let ci: { status: string; conclusion: string | null } | "none";
 let devText: string;
+let prBodies: string[];
 
 const json = (b: unknown, status = 200) =>
   new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
@@ -21,6 +22,7 @@ SUMMARY: Halaman statis
 
 beforeEach(() => {
   ghCalls = [];
+  prBodies = [];
   ci = { status: "completed", conclusion: "success" };
   devText = GOOD;
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -50,6 +52,7 @@ beforeEach(() => {
       if (url.includes("/git/trees/")) return json({ tree: [{ path: "README.md", type: "blob" }] });
       if (url.includes("/git/ref/heads/")) return json({ object: { sha: "abc" } });
       if (url.includes("/contents/") && method === "GET") return json({ message: "Not Found" }, 404);
+      if (url.endsWith("/pulls")) prBodies.push((JSON.parse(init?.body as string) as { body: string }).body);
       if (url.endsWith("/pulls")) return json({ number: 5, html_url: "https://github.com/baladikarya/demo-landing/pull/5" });
       if (url.includes("/actions/runs")) {
         if (ci === "none") return json({ workflow_runs: [] });
@@ -112,6 +115,16 @@ describe("alur build: Analyst → Architect → Developer (PR) → QA (cek CI)",
 
     const hist = env.DB.raw.prepare("SELECT project, status, pr_number FROM p5_code_tasks").all();
     expect(hist).toEqual([{ project: "demo-landing", status: "pr_open", pr_number: 5 }]);
+  });
+
+  it("badan PR memuat peringatan untuk rujukan file hilang dan form eksternal", async () => {
+    devText = `TITLE: Landing\nSUMMARY: s\n=== FILE: index.html ===\n<link href="style.css"><form action="https://formspree.io/f/zzz"></form>\n=== END FILE ===`;
+    const id = await toDevStep();
+    await waitStatus(id, "completed");
+    const prCall = prBodies[0] ?? "";
+    expect(prCall).toContain("Peringatan otomatis");
+    expect(prCall).toContain("style.css");
+    expect(prCall).toContain("formspree");
   });
 
   it("CI gagal -> run gagal; Retry hanya cek CI lagi (tanpa PR baru)", async () => {

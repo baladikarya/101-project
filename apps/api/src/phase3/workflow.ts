@@ -17,6 +17,7 @@ import {
   buildDevMessages,
   buildPrBody,
   fetchCiRuns,
+  lintFiles,
   listRepoFiles,
   summarizeCi,
 } from "../phase7/build";
@@ -270,6 +271,8 @@ export class PipelineRunWorkflow extends WorkflowEntrypoint<Phase3Env, RunParams
                   if (e instanceof AgentOutputError) throw new NonRetryableError(`Jawaban Developer tidak valid: ${e.message}`);
                   throw e;
                 }
+                const { token } = await getInstallationToken(env as unknown as CodeEnv);
+                const warnings = lintFiles(out.files, await listRepoFiles(token, prep.repo as string));
                 const res = await openPullRequest(env as unknown as CodeEnv, {
                   repo: prep.repo as string,
                   title: `agent: ${out.title}`,
@@ -282,9 +285,11 @@ export class PipelineRunWorkflow extends WorkflowEntrypoint<Phase3Env, RunParams
                     files: out.files.map((f) => f.path),
                     provider: ai?.provider ?? "?",
                     model: ai?.model ?? model,
+                    warnings,
                   }),
                   branch: prep.branch as string,
                   files: out.files,
+                  token,
                 });
                 return { ...res, title: out.title, files: out.files.map((f) => f.path) };
               });

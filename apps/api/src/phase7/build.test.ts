@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { branchFor, buildDevMessages, summarizeCi, type CiRun } from "./build";
+import { EXTERNAL_PROMPT } from "../phase5/code-task";
+import { branchFor, buildDevMessages, buildPrBody, lintFiles, summarizeCi, type CiRun } from "./build";
 
 const run = (o: Partial<CiRun>): CiRun => ({
   name: "CI",
@@ -62,5 +63,45 @@ describe("summarizeCi", () => {
   it("gagal mengalahkan pending", () => {
     const r = summarizeCi([run({ conclusion: "failure" }), run({ workflow_id: 2, status: "queued", conclusion: null })]);
     expect(r.state).toBe("fail");
+  });
+});
+
+describe("lintFiles", () => {
+  const html = (body: string) => [{ path: "index.html", content: body }];
+  it("menandai file lokal yang tidak ada", () => {
+    const w = lintFiles(html('<link href="style.css"><script src="script.js"></script><img src="assets/a.jpg">'), []);
+    expect(w).toHaveLength(3);
+    expect(w[0]).toContain("style.css");
+  });
+  it("file yang ikut di PR atau sudah ada di repo tidak ditandai", () => {
+    const files = [...html('<link href="style.css"><script src="app.js"></script>'), { path: "style.css", content: "" }];
+    expect(lintFiles(files, ["app.js"])).toEqual([]);
+  });
+  it("URL eksternal biasa, mailto, dan anchor tidak ditandai", () => {
+    expect(lintFiles(html('<a href="https://x.com">x</a><a href="#menu">m</a><a href="tel:1">t</a>'), [])).toEqual([]);
+  });
+  it("form ke URL eksternal dan href=# ditandai", () => {
+    const w = lintFiles(html('<form action="https://formspree.io/f/abc"></form><a href="#">x</a>'), []);
+    expect(w.join("|")).toMatch(/formspree/);
+    expect(w.join("|")).toMatch(/link mati/);
+  });
+  it("path relatif mengikuti folder file", () => {
+    const w = lintFiles([{ path: "site/index.html", content: '<img src="a.png">' }], []);
+    expect(w[0]).toContain("site/a.png");
+  });
+  it("peringatan masuk ke badan PR", () => {
+    const body = buildPrBody({ project: "p", repo: "o/p", runId: "r", goal: "g", summary: "s", files: ["index.html"], provider: "groq", model: "m", warnings: ["w1"] });
+    expect(body).toContain("Peringatan otomatis");
+    expect(body).toContain("- w1");
+    expect(buildPrBody({ project: "p", repo: "o/p", runId: "r", goal: "g", summary: "s", files: [], provider: "g", model: "m" })).not.toContain("Peringatan");
+  });
+});
+
+describe("prompt Developer eksternal", () => {
+  it("melarang mengarang URL/ID, gambar, form eksternal, dan link mati", () => {
+    expect(EXTERNAL_PROMPT).toMatch(/Jangan mengarang URL/);
+    expect(EXTERNAL_PROMPT).toMatch(/tanpa gambar/i);
+    expect(EXTERNAL_PROMPT).toMatch(/form action/);
+    expect(EXTERNAL_PROMPT).toMatch(/href="#" dilarang/);
   });
 });
