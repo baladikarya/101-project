@@ -16,6 +16,8 @@ export interface PrInput {
   files: PrFile[];
   base?: string;
   token?: string;
+  /** Hanya Fase 7c (bootstrap CI): izinkan tepat satu file workflow, .github/workflows/ci.yml. */
+  allowCiWorkflow?: boolean;
 }
 
 export interface PrResult {
@@ -37,7 +39,9 @@ export function assertSafeBranch(branch: string): void {
   }
 }
 
-export function assertSafePath(path: string): void {
+export const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
+
+export function assertSafePath(path: string, allowCiWorkflow = false): void {
   const bad =
     path.length === 0 ||
     path.length > 200 ||
@@ -45,7 +49,7 @@ export function assertSafePath(path: string): void {
     path.includes("\\") ||
     path.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
   if (bad) throw new GithubError("validate", `path file tidak aman: ${path}`);
-  if (path.startsWith(".github/workflows/")) {
+  if (path.startsWith(".github/workflows/") && !(allowCiWorkflow && path === CI_WORKFLOW_PATH)) {
     throw new GithubError("validate", "agent tidak boleh mengubah .github/workflows");
   }
 }
@@ -97,7 +101,7 @@ export async function openPullRequest(env: GithubEnv, input: PrInput): Promise<P
   assertSafeRepo(input.repo);
   assertSafeBranch(input.branch);
   if (input.files.length === 0) throw new GithubError("validate", "minimal satu file");
-  for (const f of input.files) assertSafePath(f.path);
+  for (const f of input.files) assertSafePath(f.path, input.allowCiWorkflow === true);
   const base = input.base ?? "main";
 
   const token = input.token ?? (await getInstallationToken(env)).token;
