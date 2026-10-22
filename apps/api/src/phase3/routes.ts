@@ -1,9 +1,11 @@
 // API alur multi-agent Fase 3. Pasang SETELAH middleware auth pemilik:
 //   app.route("/api/runs", runRoutes);
 
-import { PIPELINE_TEMPLATES, type RunStatus } from "@avo/shared";
+import { PIPELINE_TEMPLATES, stepKindOf, type RunStatus } from "@avo/shared";
 import { Hono } from "hono";
 import { z } from "zod";
+import { overDailyLimit, dailyLimit, type CodeEnv } from "../phase5/code-task";
+import { getProject, isUsable } from "../phase7/projects";
 import { checkBudget, getTemplate, readLimits, validateSteps } from "./pipeline";
 import { runEventStmt, type Phase3Env } from "./shared";
 import { loadDayUsage } from "./workflow";
@@ -21,6 +23,10 @@ interface RunRow {
   instance_id: string | null;
   current_step: number | null;
   error: string | null;
+  project: string | null;
+  branch: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -33,6 +39,7 @@ interface ListRow extends Omit<RunRow, "goal"> {
 
 interface StepDbRow {
   idx: number;
+  kind: string;
   agent: string;
   title: string;
   depends_on: string;
@@ -55,6 +62,7 @@ const createSchema = z.object({
   goal: z.string().trim().min(10).max(4000),
   template: z.string().trim().min(1).max(40),
   title: z.string().trim().max(80).optional(),
+  project: z.string().trim().max(41).optional(),
 });
 
 const noteSchema = z.object({ note: z.string().trim().max(500).optional() }).default({});
@@ -152,8 +160,25 @@ runRoutes.post("/", async (c) => {
   if (problems.length) return c.json({ error: `Template rusak: ${problems[0]}` }, 500);
   if (!env.GROQ_API_KEY) return c.json({ error: "GROQ_API_KEY belum diset di Cloudflare." }, 500);
 
+  let projectName: string | null = null;
+  if (tpl.needsProject) {
+    const proj = parsed.data.project ? await getProject(env.DB, parsed.data.project) : null;
+    if (!proj || !isUsable(proj) || proj.kind !== "external") {
+      return c.json({ error: "Pilih proyek target (proyek eksternal yang aktif) untuk alur ini." }, 400);
+    }
+    const gh = env as unknown as CodeEnv;
+    if (!gh.GITHUB_APP_ID || !gh.GITHUB_APP_INSTALLATION_ID || !gh.GITHUB_APP_PRIVATE_KEY) {
+      return c.json({ error: "GitHub App belum dikonfigurasi di Cloudflare." }, 500);
+    }
+    if (await overDailyLimit(gh)) {
+      return c.json({ error: `Batas harian ${dailyLimit(gh)} tugas coding tercapai. Free Tier Only aktif.` }, 429);
+    }
+    projectName = proj.name;
+  }
+
   const limits = readLimits(env);
-  const denied = checkBudget(await loadDayUsage(env), limits, tpl.steps.length, true);
+  const aiCalls = tpl.steps.filter((s) => stepKindOf(s) !== "ci").length;
+  const denied = checkBudget(await loadDayUsage(env), limits, aiCalls, true);
   if (denied) return c.json({ error: `${denied} Free Tier Only aktif.` }, 429);
 
   const id = crypto.randomUUID();
@@ -163,12 +188,12 @@ runRoutes.post("/", async (c) => {
 
   await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO p3_runs (id, title, goal, template, status, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', 1, ?, ?)",
-    ).bind(id, title, goal, tpl.id, now, now),
+      "INSERT INTO p3_runs (id, title, goal, template, status, attempts, project, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', 1, ?, ?, ?)",
+    ).bind(id, title, goal, tpl.id, projectName, now, now),
     ...tpl.steps.map((s, i) =>
       env.DB.prepare(
-        "INSERT INTO p3_steps (id, run_id, idx, agent, title, depends_on, needs_approval, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-      ).bind(`${id}-${i}`, id, i, s.agent, s.title, JSON.stringify(s.dependsOn), s.needsApproval ? 1 : 0, now),
+        "INSERT INTO p3_steps (id, run_id, idx, agent, title, depends_on, needs_approval, kind, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+      ).bind(`${id}-${i}`, id, i, s.agent, s.title, JSON.stringify(s.dependsOn), s.needsApproval ? 1 : 0, stepKindOf(s), now),
     ),
     runEventStmt(env.DB, id, `${id}-1-created`, "created", `Alur "${tpl.id}" diterima (${tpl.steps.length} langkah)`),
   ]);
@@ -189,7 +214,7 @@ runRoutes.get("/", async (c) => {
   const env = c.env;
   const { results } = await env.DB.prepare(
     `SELECT r.id, r.title, r.template, r.status, r.attempts, r.instance_id, r.current_step, r.error,
-            r.created_at, r.updated_at,
+            r.project, r.pr_number, r.pr_url, r.created_at, r.updated_at,
             (SELECT COUNT(*) FROM p3_steps s WHERE s.run_id = r.id) AS steps_total,
             (SELECT COUNT(*) FROM p3_steps s WHERE s.run_id = r.id AND s.status = 'completed') AS steps_done,
             (SELECT SUM(u.total_tokens) FROM p3_usage_logs u WHERE u.run_id = r.id) AS total_tokens
@@ -199,7 +224,7 @@ runRoutes.get("/", async (c) => {
   return c.json({
     runs: synced.map(({ instance_id: _i, ...rest }) => rest),
     limits: await limitsPayload(env),
-    templates: PIPELINE_TEMPLATES.map((t) => ({ id: t.id, label: t.label })),
+    templates: PIPELINE_TEMPLATES.map((t) => ({ id: t.id, label: t.label, needs_project: t.needsProject === true })),
   });
 });
 
@@ -211,7 +236,7 @@ runRoutes.get("/:id", async (c) => {
   const synced = await syncStatus(env, run);
   const [steps, events] = await Promise.all([
     env.DB.prepare(
-      `SELECT idx, agent, title, depends_on, needs_approval, status, output, approval_note, provider, model,
+      `SELECT idx, kind, agent, title, depends_on, needs_approval, status, output, approval_note, provider, model,
               prompt_tokens, completion_tokens, total_tokens, latency_ms, error
        FROM p3_steps WHERE run_id = ? ORDER BY idx ASC`,
     )
