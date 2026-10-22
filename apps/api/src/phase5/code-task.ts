@@ -52,7 +52,7 @@ SUMMARY: <ringkasan satu baris>
 === END FILE ===
 (ulangi blok FILE untuk file berikutnya)`;
 
-const EXTERNAL_PROMPT = `Kamu Agent Developer untuk proyek web kecil di repo terpisah. Struktur repo bebas; path relatif dari root repo.
+export const EXTERNAL_PROMPT = `Kamu Agent Developer untuk proyek web kecil di repo terpisah. Struktur repo bebas; path relatif dari root repo.
 Tugas: buat atau ubah file sesuai instruksi pemilik. Jaga proyek tetap sederhana dan berdiri sendiri.
 Aturan:
 - Maksimal 3 file.

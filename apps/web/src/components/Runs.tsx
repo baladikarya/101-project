@@ -1,8 +1,10 @@
 import {
   AGENT_ROLES,
   PIPELINE_TEMPLATES,
+  ProjectListSchema,
   RunDetailSchema,
   RunListSchema,
+  stepKindOf,
   type RunDetail,
   type RunList,
   type RunStatus,
@@ -53,6 +55,8 @@ export function Runs() {
   const [goal, setGoal] = useState("");
   const [template, setTemplate] = useState(PIPELINE_TEMPLATES[0]?.id ?? "standard");
   const [note, setNote] = useState("");
+  const [projects, setProjects] = useState<string[]>([]);
+  const [project, setProject] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,6 +73,16 @@ export function Runs() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    getJson("/api/projects", ProjectListSchema)
+      .then((r) => {
+        const names = r.projects.filter((p) => p.kind === "external" && p.status !== "archived").map((p) => p.name);
+        setProjects(names);
+        setProject((cur) => cur || names[0] || "");
+      })
+      .catch(() => setProjects([]));
+  }, []);
 
   const anyBusy = list?.runs.some((r) => isBusy(r.status)) ?? false;
   useEffect(() => {
@@ -90,9 +104,11 @@ export function Runs() {
     }
   }
 
+  const tpl = PIPELINE_TEMPLATES.find((t) => t.id === template);
+
   const submit = () =>
     run(async () => {
-      await postJson(API, { goal, template });
+      await postJson(API, { goal, template, ...(tpl?.needsProject ? { project } : {}) });
       setGoal("");
     });
 
@@ -112,7 +128,6 @@ export function Runs() {
 
   const btn = "rounded-lg px-3 py-1.5 text-sm font-medium disabled:opacity-40";
   const lim = list?.limits;
-  const tpl = PIPELINE_TEMPLATES.find((t) => t.id === template);
 
   return (
     <div className="space-y-4">
@@ -138,9 +153,25 @@ export function Runs() {
             </option>
           ))}
         </select>
+        {tpl?.needsProject && (
+          <select
+            value={project}
+            onChange={(e) => setProject(e.target.value)}
+            aria-label="Proyek target"
+            className="mt-2 w-full rounded-xl border border-line bg-surface p-2.5 text-sm"
+          >
+            {projects.length === 0 && <option value="">Belum ada proyek target</option>}
+            {projects.map((n) => (
+              <option key={n} value={n}>
+                Proyek target: {n}
+              </option>
+            ))}
+          </select>
+        )}
         {tpl && (
           <p className="mt-1 text-xs text-muted">
-            {tpl.steps.length} panggilan AI · persetujuan Anda diminta di:{" "}
+            {tpl.steps.filter((s) => stepKindOf(s) !== "ci").length} panggilan AI
+            {tpl.needsProject ? " · hasil: 1 Pull Request (tidak di-merge)" : ""} · persetujuan Anda diminta di:{" "}
             {tpl.steps
               .filter((s) => s.needsApproval)
               .map((s) => agentName(s.agent))
@@ -149,7 +180,7 @@ export function Runs() {
         )}
         <button
           onClick={() => void submit()}
-          disabled={busy || goal.trim().length < 10}
+          disabled={busy || goal.trim().length < 10 || (tpl?.needsProject === true && !project)}
           className="mt-2 w-full rounded-lg bg-accent py-2 font-medium text-accent-ink disabled:opacity-40"
         >
           {busy ? "Memproses…" : "Mulai alur tim"}
@@ -183,6 +214,7 @@ export function Runs() {
                 <p className="mt-1 text-xs text-muted">
                   {fmtTime(r.created_at)} · {r.steps_done}/{r.steps_total} langkah · percobaan {r.attempts} ·{" "}
                   {fmtNum(r.total_tokens)} token
+                  {r.project ? ` · ${r.project}` : ""}
                 </p>
               </button>
 
@@ -215,6 +247,14 @@ export function Runs() {
                       <section>
                         <h3 className="mb-1 text-xs font-semibold uppercase text-muted">Tujuan</h3>
                         <p className="whitespace-pre-wrap break-words">{detail.run.goal}</p>
+                        {detail.run.pr_url && (
+                          <p className="mt-2 break-words">
+                            Pull Request:{" "}
+                            <a href={detail.run.pr_url} target="_blank" rel="noreferrer" className="font-medium text-accent underline">
+                              {detail.run.project} #{detail.run.pr_number}
+                            </a>
+                          </p>
+                        )}
                       </section>
 
                       <ol className="space-y-2">

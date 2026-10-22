@@ -74,6 +74,7 @@ class FakeInstance {
           }
         }
       },
+      sleep: async () => {},
       waitForEvent: async (_name: string, opts: { type: string }) => {
         this.waiting = true;
         const buf = this.buffered.get(opts.type);
