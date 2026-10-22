@@ -48,6 +48,31 @@ export function buildDevMessages(opts: {
   };
 }
 
+/** Peringatan otomatis untuk kode buatan AI: rujukan file hilang, form ke luar, link mati. Tidak memblokir PR. */
+export function lintFiles(
+  files: readonly { path: string; content: string }[],
+  existing: readonly string[],
+): string[] {
+  const have = new Set([...existing, ...files.map((f) => f.path)]);
+  const out: string[] = [];
+  for (const f of files) {
+    if (!/\.(html?|svg)$/i.test(f.path)) continue;
+    const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/") + 1) : "";
+    const refs = new Set<string>();
+    for (const m of f.content.matchAll(/\b(?:src|href)\s*=\s*["']([^"']+)["']/gi)) {
+      const r = (m[1] ?? "").trim();
+      if (!r || /^(https?:|\/\/|mailto:|tel:|data:|javascript:|#)/i.test(r)) continue;
+      refs.add((dir + r.split(/[?#]/)[0]).replace(/^\.\//, ""));
+    }
+    for (const r of refs) if (!have.has(r)) out.push(`${f.path} memuat \`${r}\` yang tidak ada di PR maupun repo`);
+    for (const m of f.content.matchAll(/<form\b[^>]*\baction\s*=\s*["'](https?:\/\/[^"']+)["']/gi)) {
+      out.push(`${f.path} mengirim form ke URL eksternal ${m[1]} (periksa kepemilikan endpoint)`);
+    }
+    if (/\bhref\s*=\s*["']#["']/i.test(f.content)) out.push(`${f.path} punya link mati href="#"`);
+  }
+  return out;
+}
+
 export function buildPrBody(opts: {
   project: string;
   repo: string;
@@ -57,7 +82,11 @@ export function buildPrBody(opts: {
   files: readonly string[];
   provider: string;
   model: string;
+  warnings?: readonly string[];
 }): string {
+  const warn = opts.warnings?.length
+    ? ["", "## Peringatan otomatis (review sebelum merge)", ...opts.warnings.map((w) => `- ${w}`)]
+    : [];
   return [
     `Proyek: \`${opts.project}\` (${opts.repo})`,
     `Alur tim: \`${opts.runId}\` (Analyst → Architect → Developer → QA)`,
@@ -70,6 +99,7 @@ export function buildPrBody(opts: {
     "",
     "## File",
     ...opts.files.map((f) => `- \`${f}\``),
+    ...warn,
     "",
     `_Dibuat otomatis oleh alur tim (${opts.provider}/${opts.model}). Review dulu; merge hanya jika CI hijau._`,
   ].join("\n");

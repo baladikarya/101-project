@@ -57,6 +57,10 @@ Tugas: buat atau ubah file sesuai instruksi pemilik. Jaga proyek tetap sederhana
 Aturan:
 - Maksimal 3 file.
 - Jangan ubah package.json, lockfile, wrangler.jsonc, .github, atau .env.
+- Jangan mengarang URL, ID, endpoint form, nomor telepon, kunci API, atau data nyata. Bila perlu nilai seperti itu, tulis placeholder jelas (contoh: GANTI_DENGAN_NOMOR_WA) dan sebut di SUMMARY.
+- Jangan mengirim data pengguna ke layanan pihak ketiga. Tanpa form action ke URL eksternal.
+- Tanpa file biner dan tanpa gambar. Jangan memuat file yang tidak kamu tulis atau tidak ada di daftar file repo. Bila instruksi meminta satu file, buat CSS dan JS inline di file itu.
+- Tanpa link mati: href="#" dilarang; pakai bagian halaman (#menu) yang ada di halaman.
 - Untuk file yang diubah, tulis ISI LENGKAP file baru (bukan potongan atau diff).
 - Tanpa pagar kode (tiga backtick). Tanpa penjelasan di luar format.
 Format jawaban PERSIS:
