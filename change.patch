@@ -1,0 +1,120 @@
+diff --git a/apps/api/src/phase7/bootstrap.ts b/apps/api/src/phase7/bootstrap.ts
+index 0205234..58057d1 100644
+--- a/apps/api/src/phase7/bootstrap.ts
++++ b/apps/api/src/phase7/bootstrap.ts
+@@ -16,6 +16,19 @@ export interface BootstrapResult {
+   pr_url?: string;
+   branch?: string;
+   files?: string[];
++  /** File template yang sudah ada di main sehingga tidak ditimpa. */
++  skipped?: SkippedFile[];
++}
++
++export interface SkippedFile {
++  path: string;
++  reason: string;
++}
++
++export const SKIP_REASON = "sudah ada di main, tidak ditimpa";
++
++export function skippedFiles(all: readonly { path: string }[], existing: ReadonlySet<string>): SkippedFile[] {
++  return all.filter((f) => existing.has(f.path)).map((f) => ({ path: f.path, reason: SKIP_REASON }));
+ }
+ 
+ export function bootstrapBranch(now: number): string {
+@@ -23,13 +36,31 @@ export function bootstrapBranch(now: number): string {
+   return `agent/bootstrap-${stamp}`;
+ }
+ 
+-export function bootstrapBody(project: string, repo: string, files: readonly string[]): string {
++export function bootstrapBody(
++  project: string,
++  repo: string,
++  files: readonly string[],
++  skipped: readonly SkippedFile[] = [],
++): string {
++  const skipLines =
++    skipped.length === 0
++      ? []
++      : [
++          "",
++          "## Dilewati (sudah ada di main)",
++          ...skipped.map((f) => `- \`${f.path}\``),
++          "",
++          skipped.some((f) => f.path === CI_WORKFLOW_PATH)
++            ? "`ci.yml` lama dipertahankan. Nama job-nya mungkin bukan `test`: wajibkan check dengan nama job yang sebenarnya di ruleset, atau ganti isinya dengan template."
++            : "File di atas tidak diubah; periksa apakah cocok dengan template.",
++        ];
+   return [
+     `Proyek: \`${project}\` (${repo})`,
+     "",
+     "## Template CI proyek baru (Fase 7c)",
+     "Isi template tetap, bukan buatan AI:",
+     ...files.map((f) => `- \`${f}\``),
++    ...skipLines,
+     "",
+     "Job CI bernama `test`: `npm run build` lalu `npm test` (cek `dist/index.html` + rujukan file lokal). Tanpa dependensi.",
+     "",
+@@ -62,20 +93,21 @@ export async function bootstrapProject(env: GithubEnv, project: Project, now = D
+       if (await readRepoFile(inst.token, project.repo, f.path, "main")) existing.add(f.path);
+     }
+     const files = missingFiles(all, existing);
++    const skipped = skippedFiles(all, existing);
+     if (files.length === 0) {
+-      return { ok: false, status: 409, step: "exists", error: "semua file template sudah ada di main" };
++      return { ok: false, status: 409, step: "exists", error: "semua file template sudah ada di main", skipped };
+     }
+     const names = files.map((f) => f.path);
+     const pr = await openPullRequest(env, {
+       repo: project.repo,
+       title: "agent: Template CI proyek baru",
+-      body: bootstrapBody(project.name, project.repo, names),
++      body: bootstrapBody(project.name, project.repo, names, skipped),
+       branch: bootstrapBranch(now),
+       files,
+       token: inst.token,
+       allowCiWorkflow: names.includes(CI_WORKFLOW_PATH),
+     });
+-    return { ok: true, pr_number: pr.number, pr_url: pr.url, branch: pr.branch, files: names };
++    return { ok: true, pr_number: pr.number, pr_url: pr.url, branch: pr.branch, files: names, skipped };
+   } catch (err) {
+     if (err instanceof GithubError) {
+       return { ok: false, status: 502, step: err.step, error: err.message };
+diff --git a/apps/api/src/phase7/template.test.ts b/apps/api/src/phase7/template.test.ts
+index a70432a..4db7ca6 100644
+--- a/apps/api/src/phase7/template.test.ts
++++ b/apps/api/src/phase7/template.test.ts
+@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
+ import { describe, expect, it } from "vitest";
+ import { assertAgentPath, AgentOutputError } from "../phase5/code-parse";
+ import { assertSafePath } from "../phase5/pr";
+-import { bootstrapBody, bootstrapBranch } from "./bootstrap";
++import { bootstrapBody, bootstrapBranch, skippedFiles, SKIP_REASON } from "./bootstrap";
+ import { missingFiles, templateFiles } from "./template";
+ 
+ function site(files: Record<string, string>): string {
+@@ -136,4 +136,24 @@ describe("bootstrap helpers", () => {
+     expect(body).toContain("`package.json`");
+     expect(body).toContain("protect-main");
+   });
++
++  it("skippedFiles menyebut file yang sudah ada beserta alasan", () => {
++    const all = templateFiles("demo-landing");
++    const sk = skippedFiles(all, new Set([".github/workflows/ci.yml"]));
++    expect(sk).toEqual([{ path: ".github/workflows/ci.yml", reason: SKIP_REASON }]);
++    expect(skippedFiles(all, new Set())).toEqual([]);
++  });
++
++  it("body PR memberi peringatan nama check bila ci.yml dilewati", () => {
++    const body = bootstrapBody("demo-landing", "o/demo-landing", ["package.json"], [
++      { path: ".github/workflows/ci.yml", reason: SKIP_REASON },
++    ]);
++    expect(body).toContain("## Dilewati");
++    expect(body).toContain("`.github/workflows/ci.yml`");
++    expect(body).toContain("bukan `test`");
++  });
++
++  it("body PR tanpa file dilewati tidak punya bagian Dilewati", () => {
++    expect(bootstrapBody("p", "o/p", ["package.json"])).not.toContain("Dilewati");
++  });
+ });
