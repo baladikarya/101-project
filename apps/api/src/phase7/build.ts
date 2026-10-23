@@ -108,6 +108,8 @@ export function buildPrBody(opts: {
 // ---- Status CI ----
 
 export interface CiRun {
+  id?: number;
+  head_sha?: string;
   name: string;
   workflow_id: number;
   status: string | null;
@@ -125,13 +127,30 @@ export interface CiVerdict {
 
 const OK = new Set(["success", "neutral", "skipped"]);
 
-/** Ambil run terbaru per workflow, lalu tentukan status gabungan. */
-export function summarizeCi(runs: readonly CiRun[]): CiVerdict {
+/** Run terbaru per workflow. */
+export function latestRuns(runs: readonly CiRun[]): CiRun[] {
   const latest = new Map<number, CiRun>();
   for (const r of [...runs].sort((a, b) => (a.created_at < b.created_at ? 1 : -1))) {
     if (!latest.has(r.workflow_id)) latest.set(r.workflow_id, r);
   }
-  const list = [...latest.values()];
+  return [...latest.values()];
+}
+
+/** Run terbaru per workflow yang selesai dengan kegagalan nyata (bukan menunggu persetujuan). */
+export function failedRuns(runs: readonly CiRun[]): CiRun[] {
+  return latestRuns(runs).filter(
+    (r) => r.status === "completed" && r.conclusion !== null && !OK.has(r.conclusion) && r.conclusion !== "action_required",
+  );
+}
+
+/** Hanya run milik commit tertentu (setelah perbaikan, run lama tidak boleh dihitung). */
+export function scopeToSha(runs: readonly CiRun[], sha: string): CiRun[] {
+  return runs.filter((r) => r.head_sha === sha);
+}
+
+/** Ambil run terbaru per workflow, lalu tentukan status gabungan. */
+export function summarizeCi(runs: readonly CiRun[]): CiVerdict {
+  const list = latestRuns(runs);
   if (list.length === 0) return { state: "none", text: "Belum ada run CI untuk branch ini." };
   const line = (r: CiRun) => `- ${r.name}: ${r.status === "completed" ? (r.conclusion ?? "?") : (r.status ?? "?")} ${r.html_url}`;
   const lines = list.map(line).join("\n");
@@ -153,6 +172,8 @@ export async function fetchCiRuns(token: string, repo: string, branch: string): 
     "ci_runs",
   );
   return (res.workflow_runs ?? []).map((r) => ({
+    id: r.id,
+    head_sha: r.head_sha,
     name: r.name,
     workflow_id: r.workflow_id,
     status: r.status,
