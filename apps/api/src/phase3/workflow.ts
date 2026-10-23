@@ -9,7 +9,7 @@ import { AiError, createProvider, type AiResult } from "../phase2/ai";
 import { getInstallationToken } from "../phase5/github-app";
 import { parseAgentOutput, AgentOutputError } from "../phase5/code-parse";
 import { overDailyLimit, type CodeEnv } from "../phase5/code-task";
-import { openPullRequest } from "../phase5/pr";
+import { commentOnPr, listPrFiles, openPullRequest, pushToBranch, readRepoFile } from "../phase5/pr";
 import {
   CI_MAX_POLLS,
   CI_POLL_DELAY,
@@ -19,8 +19,20 @@ import {
   fetchCiRuns,
   lintFiles,
   listRepoFiles,
+  scopeToSha,
   summarizeCi,
+  type CiVerdict,
 } from "../phase7/build";
+import {
+  MAX_REPAIRS,
+  REPAIR_FILE_CHARS,
+  applyDrill,
+  buildFixMessages,
+  fetchFailureLog,
+  repairGate,
+  repairTokenCap,
+  stopReport,
+} from "../phase7/repair";
 import { getProject, isUsable } from "../phase7/projects";
 import { buildMessages, checkBudget, isProviderAllowed, readLimits, type DepOutput } from "./pipeline";
 import { dayStartMs, runEventStmt, type Phase3Env, type RunParams } from "./shared";
@@ -82,23 +94,230 @@ export async function loadDayUsage(env: Phase3Env) {
   };
 }
 
-/** Cek CI Pull Request berkala (step.sleep tidak memakai sumber daya). Lulus -> teks ringkasan; selain itu error. */
-async function pollCi(env: Phase3Env, step: WorkflowStep, idx: number, repo: string, branch: string): Promise<string> {
+/** Cek CI Pull Request berkala (step.sleep tidak memakai sumber daya). Mengembalikan verdict lulus/gagal; belum selesai setelah batas = error. */
+async function pollCi(
+  env: Phase3Env,
+  step: WorkflowStep,
+  idx: number,
+  repo: string,
+  branch: string,
+  round: number,
+  sha?: string,
+): Promise<CiVerdict> {
+  const pre = round === 0 ? `s${idx}-ci-` : `s${idx}-r${round}-ci-`;
   let last = "CI belum diperiksa.";
   for (let n = 0; n < CI_MAX_POLLS; n++) {
-    const v = await step.do(`s${idx}-ci-${n}`, { retries: { limit: 2, delay: "10 seconds" }, timeout: "30 seconds" }, async () => {
+    const v = await step.do(`${pre}${n}`, { retries: { limit: 2, delay: "10 seconds" }, timeout: "30 seconds" }, async (): Promise<CiVerdict> => {
       const { token } = await getInstallationToken(env as unknown as CodeEnv);
-      return summarizeCi(await fetchCiRuns(token, repo, branch));
+      const runs = await fetchCiRuns(token, repo, branch);
+      if (!sha) return summarizeCi(runs);
+      // Setelah perbaikan hanya run milik commit perbaikan yang dihitung (run lama masih gagal).
+      const mine = scopeToSha(runs, sha);
+      return mine.length === 0 ? { state: "pending", text: "Menunggu CI untuk commit perbaikan" } : summarizeCi(mine);
     });
     last = v.text;
-    if (v.state === "pass") return v.text;
-    if (v.state === "fail") throw new NonRetryableError(v.text.slice(0, 450));
-    if (n < CI_MAX_POLLS - 1) await step.sleep(`s${idx}-ci-wait-${n}`, CI_POLL_DELAY);
+    if (v.state === "pass" || v.state === "fail") return v;
+    if (n < CI_MAX_POLLS - 1) await step.sleep(`${pre}wait-${n}`, CI_POLL_DELAY);
   }
   const hint = last.startsWith("Belum ada run CI")
     ? " Repo target perlu workflow CI (pull_request). Setelah ada, tekan Retry."
     : " Tekan Retry untuk memeriksa lagi.";
   throw new NonRetryableError(`CI belum selesai setelah ${CI_MAX_POLLS} menit. ${last.split("\n")[0]}${hint}`.slice(0, 480));
+}
+
+/**
+ * Fase 7e: QA cek CI. Gagal -> baca log -> commit perbaikan ke PR yang sama -> cek lagi.
+ * Maks MAX_REPAIRS perbaikan per alur dan batas token per alur; setelah itu berhenti dan lapor (komentar PR + error alur).
+ */
+async function ciWithRepair(
+  env: Phase3Env,
+  step: WorkflowStep,
+  p: { idx: number; runId: string; attempt: number; repo: string; branch: string; project: string | null; goal: string },
+): Promise<string> {
+  const { idx, runId, attempt, repo, branch } = p;
+  const cap = repairTokenCap(env);
+  const notes: string[] = [];
+  const prNumber = async (): Promise<number | null> =>
+    (await env.DB.prepare("SELECT pr_number FROM p3_runs WHERE id = ?").bind(runId).first<{ pr_number: number | null }>())?.pr_number ?? null;
+  let sha: string | undefined;
+
+  // Uji coba terkontrol (REPAIR_DRILL=true): sekali per alur, PR sengaja dirusak lalu harus diperbaiki.
+  if (env.REPAIR_DRILL === "true") {
+    const drilled = await step.do(`s${idx}-drill`, { retries: { limit: 0, delay: "5 seconds" }, timeout: "60 seconds" }, async (): Promise<string | null> => {
+      if (await env.DB.prepare("SELECT 1 AS x FROM p3_events WHERE id = ?").bind(`${runId}-drill`).first()) return null;
+      const number = await prNumber();
+      if (!number) throw new NonRetryableError("Nomor PR tidak ada di D1.");
+      const { token } = await getInstallationToken(env as unknown as CodeEnv);
+      const files: { path: string; content: string }[] = [];
+      for (const path of (await listPrFiles(token, repo, number)).filter((f) => /\.html?$/i.test(f)).slice(0, 1)) {
+        const f = await readRepoFile(token, repo, path, branch);
+        if (f) files.push({ path, content: f.content });
+      }
+      const broken = applyDrill(files);
+      if (!broken) throw new NonRetryableError("Uji perbaikan: PR tidak punya file HTML untuk dirusak.");
+      const res = await pushToBranch(env as unknown as CodeEnv, {
+        repo,
+        branch,
+        files: [broken],
+        message: "agent: uji perbaikan (sengaja merusak rujukan)",
+        token,
+      });
+      await commentOnPr(token, repo, number, "## Uji perbaikan\nREPAIR_DRILL aktif: agent sengaja menambah rujukan ke file yang tidak ada agar CI gagal. Perbaikan otomatis harus membereskannya.");
+      await runEventStmt(env.DB, runId, `${runId}-drill`, "repair", `Uji perbaikan: PR sengaja dirusak (commit ${res.sha.slice(0, 7)})`).run();
+      return res.sha;
+    });
+    if (drilled) sha = drilled;
+  }
+
+  const stopRun = async (round: number, reason: string, verdict: string, done: number): Promise<never> => {
+    await step.do(`s${idx}-r${round}-report`, async () => {
+      try {
+        const number = await prNumber();
+        if (number) {
+          const { token } = await getInstallationToken(env as unknown as CodeEnv);
+          await commentOnPr(token, repo, number, stopReport(reason, verdict, done));
+        }
+      } catch {
+        // laporan di PR hanya tambahan; laporan utama ada di status alur
+      }
+      await runEventStmt(env.DB, runId, `${runId}-${attempt}-s${idx}-stop${round}`, "repair", `Perbaikan berhenti: ${reason}`).run();
+    });
+    throw new NonRetryableError(`${reason} CI masih gagal; berhenti dan lapor. ${verdict.split("\n")[0] ?? ""}`.slice(0, 480));
+  };
+
+  for (let round = 0; ; round++) {
+    const v = await pollCi(env, step, idx, repo, branch, round, sha);
+    if (v.state === "pass") return [v.text, ...notes].join("\n");
+
+    // Gerbang: jumlah perbaikan, token per alur, batas harian.
+    const gate = await step.do(`s${idx}-r${round}-gate`, async () => {
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(total_tokens), 0) AS t FROM p3_usage_logs WHERE run_id = ? AND agent = 'developer-fix'",
+      )
+        .bind(runId)
+        .first<{ n: number; t: number }>();
+      const done = row?.n ?? 0;
+      const used = row?.t ?? 0;
+      const stop = repairGate(done, used, cap) ?? checkBudget(await loadDayUsage(env), readLimits(env), 1, false);
+      return { done, stop };
+    });
+    if (gate.stop) await stopRun(round, gate.stop, v.text, gate.done);
+    const n = gate.done + 1;
+
+    // Konteks: log job yang gagal + isi file PR saat ini.
+    const ctx = await step.do(`s${idx}-r${round}-ctx`, { retries: { limit: 2, delay: "10 seconds" }, timeout: "60 seconds" }, async () => {
+      const { token } = await getInstallationToken(env as unknown as CodeEnv);
+      const all = await fetchCiRuns(token, repo, branch);
+      const log = await fetchFailureLog(token, repo, sha ? scopeToSha(all, sha) : all);
+      const number = await prNumber();
+      if (!number) throw new NonRetryableError("Nomor PR tidak ada di D1.");
+      const files: { path: string; content: string }[] = [];
+      for (const path of (await listPrFiles(token, repo, number)).slice(0, 3)) {
+        const f = await readRepoFile(token, repo, path, branch);
+        if (!f) continue;
+        if (f.content.length > REPAIR_FILE_CHARS) {
+          return { ok: false as const, reason: `File ${path} terlalu besar (>${REPAIR_FILE_CHARS} karakter) untuk perbaikan otomatis.` };
+        }
+        files.push({ path, content: f.content });
+      }
+      if (files.length === 0) return { ok: false as const, reason: "PR tidak punya file yang bisa diperbaiki." };
+      return { ok: true as const, log, files, number };
+    });
+    if (!ctx.ok) await stopRun(round, ctx.reason, v.text, gate.done);
+    if (!ctx.ok) continue;
+
+    const ai = await step.do(
+      `s${idx}-r${round}-ai`,
+      { retries: { limit: 2, delay: "15 seconds", backoff: "exponential" }, timeout: "90 seconds" },
+      async () => {
+        try {
+          const provider = createProvider(env);
+          if (!isProviderAllowed(provider.name, readLimits(env).freeTierOnly)) {
+            throw new NonRetryableError(`Penyedia "${provider.name}" tidak gratis; Free Tier Only aktif.`);
+          }
+          const fix = buildFixMessages({ project: p.project ?? "", goal: p.goal, files: ctx.files, log: ctx.log, round: n });
+          return await provider.complete(fix.messages, { maxTokens: fix.maxTokens, temperature: 0.2 });
+        } catch (e) {
+          if (e instanceof AiError && !e.retryable) throw new NonRetryableError(e.message);
+          throw e;
+        }
+      },
+    );
+
+    // Token dicatat segera (angka penyedia), sebelum jawaban diperiksa, supaya batas per alur akurat.
+    await step.do(`s${idx}-r${round}-usage`, async () => {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT OR REPLACE INTO p3_usage_logs
+           (id, run_id, step_idx, attempt, agent, provider, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at)
+           VALUES (?, ?, ?, ?, 'developer-fix', ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          `${runId}-${attempt}-s${idx}-fix${n}`,
+          runId,
+          idx,
+          attempt,
+          ai.provider,
+          ai.model,
+          ai.usage.promptTokens,
+          ai.usage.completionTokens,
+          ai.usage.totalTokens,
+          ai.latencyMs,
+          Date.now(),
+        ),
+        runEventStmt(
+          env.DB,
+          runId,
+          `${runId}-${attempt}-s${idx}-fix${n}-ai`,
+          "repair",
+          `Perbaikan ${n}/${MAX_REPAIRS}: CI gagal, AI membaca log (${ai.provider}/${ai.model}, ${ai.usage.totalTokens} token)`,
+        ),
+      ]);
+    });
+
+    // Commit ke branch PR yang sama. Tanpa retry otomatis agar tidak ada commit ganda.
+    const pushed = await step.do(`s${idx}-r${round}-push`, { retries: { limit: 0, delay: "5 seconds" }, timeout: "90 seconds" }, async () => {
+      let out;
+      try {
+        out = parseAgentOutput(ai.text, "external");
+      } catch (e) {
+        if (e instanceof AgentOutputError) return { ok: false as const, reason: `Jawaban perbaikan tidak valid: ${e.message}` };
+        throw e;
+      }
+      const { token } = await getInstallationToken(env as unknown as CodeEnv);
+      const res = await pushToBranch(env as unknown as CodeEnv, {
+        repo,
+        branch,
+        files: out.files,
+        message: `agent: perbaikan CI ${n}/${MAX_REPAIRS} - ${out.title}`,
+        token,
+      });
+      try {
+        await commentOnPr(
+          token,
+          repo,
+          ctx.number,
+          `## Perbaikan otomatis ${n}/${MAX_REPAIRS}\n${out.summary || out.title}\n\nFile: ${out.files.map((f) => `\`${f.path}\``).join(", ")}\nCommit: ${res.sha}`,
+        );
+      } catch {
+        // komentar hanya tambahan
+      }
+      return { ok: true as const, sha: res.sha, title: out.title };
+    });
+    if (!pushed.ok) await stopRun(round, pushed.reason, v.text, n);
+    if (!pushed.ok) continue;
+
+    await step.do(`s${idx}-r${round}-done`, async () => {
+      await runEventStmt(
+        env.DB,
+        runId,
+        `${runId}-${attempt}-s${idx}-fix${n}-done`,
+        "repair",
+        `Perbaikan ${n}/${MAX_REPAIRS}: commit ${pushed.sha.slice(0, 7)} - ${pushed.title}`,
+      ).run();
+    });
+    notes.push(`Perbaikan otomatis ${n}/${MAX_REPAIRS}: ${pushed.title} (commit ${pushed.sha.slice(0, 7)}, ${ai.usage.totalTokens} token)`);
+    sha = pushed.sha;
+  }
 }
 
 export class PipelineRunWorkflow extends WorkflowEntrypoint<Phase3Env, RunParams> {
@@ -220,7 +439,15 @@ export class PipelineRunWorkflow extends WorkflowEntrypoint<Phase3Env, RunParams
           let pr: { number: number; url: string; branch: string; title: string; files: string[] } | null = null;
 
           if (prep.kind === "ci") {
-            output = await pollCi(env, step, idx, prep.repo as string, prep.branch as string);
+            output = await ciWithRepair(env, step, {
+              idx,
+              runId,
+              attempt,
+              repo: prep.repo as string,
+              branch: prep.branch as string,
+              project: prep.project,
+              goal: prep.goal,
+            });
           } else {
             ai = await step.do(
               `s${idx}-ai`,

@@ -168,3 +168,11 @@ export async function githubRequest<T>(
 export function githubGet<T>(token: string, path: string, step: string): Promise<T> {
   return githubRequest<T>(token, "GET", path, step);
 }
+
+/** GET yang membalas teks (mis. log job Actions). Redirect diikuti; maksimal 200k karakter terakhir. */
+export async function githubText(token: string, path: string, step: string): Promise<string> {
+  const res = await fetch(`${GITHUB_API}${path}`, { method: "GET", headers: ghHeaders(token) });
+  if (!res.ok) throw await failFrom(res, step);
+  const text = await res.text();
+  return text.length > 200_000 ? text.slice(-200_000) : text;
+}

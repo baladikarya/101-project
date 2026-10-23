@@ -14,6 +14,10 @@ export interface Phase3Env extends Phase2Env {
   MAX_RUNS_PER_DAY?: string;
   MAX_AI_CALLS_PER_DAY?: string;
   MAX_TOKENS_PER_DAY?: string;
+  /** Fase 7e: batas token untuk semua perbaikan otomatis dalam satu alur. Bawaan 30000. */
+  MAX_REPAIR_TOKENS_PER_RUN?: string;
+  /** Fase 7e: "true" = uji coba; agent sengaja merusak PR sekali lalu harus memperbaikinya. Bawaan mati. */
+  REPAIR_DRILL?: string;
 }
 
 export function runEventStmt(

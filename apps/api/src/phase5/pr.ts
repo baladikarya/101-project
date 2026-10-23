@@ -134,3 +134,51 @@ export async function openPullRequest(env: GithubEnv, input: PrInput): Promise<P
   });
   return { number: pr.number, url: pr.html_url, branch: input.branch };
 }
+
+/** Fase 7e: commit perbaikan ke branch agent/* yang sudah ada (PR yang sama ikut diperbarui). Tidak pernah ke main. */
+export async function pushToBranch(
+  env: GithubEnv,
+  input: { repo: string; branch: string; files: PrFile[]; message: string; token?: string },
+): Promise<{ sha: string }> {
+  assertSafeRepo(input.repo);
+  assertSafeBranch(input.branch);
+  if (input.files.length === 0) throw new GithubError("validate", "minimal satu file");
+  for (const f of input.files) assertSafePath(f.path);
+  const token = input.token ?? (await getInstallationToken(env)).token;
+  let sha = "";
+  for (const f of input.files) {
+    const existing = await readRepoFile(token, input.repo, f.path, input.branch);
+    const res = await githubRequest<{ commit?: { sha?: string } }>(
+      token,
+      "PUT",
+      `/repos/${input.repo}/contents/${encodePath(f.path)}`,
+      "commit_file",
+      {
+        message: input.message.slice(0, 200),
+        content: toBase64Utf8(f.content),
+        branch: input.branch,
+        ...(existing ? { sha: existing.sha } : {}),
+      },
+    );
+    sha = res.commit?.sha ?? "";
+  }
+  if (!sha) throw new GithubError("commit_file", "GitHub tidak mengembalikan SHA commit");
+  return { sha };
+}
+
+export async function commentOnPr(token: string, repo: string, number: number, body: string): Promise<void> {
+  assertSafeRepo(repo);
+  await githubRequest(token, "POST", `/repos/${repo}/issues/${number}/comments`, "pr_comment", { body: body.slice(0, 4000) });
+}
+
+/** Path file yang diubah PR (bukan yang dihapus). */
+export async function listPrFiles(token: string, repo: string, number: number): Promise<string[]> {
+  assertSafeRepo(repo);
+  const res = await githubRequest<{ filename: string; status: string }[]>(
+    token,
+    "GET",
+    `/repos/${repo}/pulls/${number}/files?per_page=30`,
+    "pr_files",
+  );
+  return res.filter((f) => f.status !== "removed").map((f) => f.filename);
+}
