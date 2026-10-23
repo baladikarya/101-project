@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { assertAgentPath, AgentOutputError } from "../phase5/code-parse";
 import { assertSafePath } from "../phase5/pr";
-import { bootstrapBody, bootstrapBranch } from "./bootstrap";
+import { bootstrapBody, bootstrapBranch, skippedFiles, SKIP_REASON } from "./bootstrap";
 import { missingFiles, templateFiles } from "./template";
 
 function site(files: Record<string, string>): string {
@@ -135,5 +135,25 @@ describe("bootstrap helpers", () => {
     const body = bootstrapBody("demo-landing", "o/demo-landing", ["package.json"]);
     expect(body).toContain("`package.json`");
     expect(body).toContain("protect-main");
+  });
+
+  it("skippedFiles menyebut file yang sudah ada beserta alasan", () => {
+    const all = templateFiles("demo-landing");
+    const sk = skippedFiles(all, new Set([".github/workflows/ci.yml"]));
+    expect(sk).toEqual([{ path: ".github/workflows/ci.yml", reason: SKIP_REASON }]);
+    expect(skippedFiles(all, new Set())).toEqual([]);
+  });
+
+  it("body PR memberi peringatan nama check bila ci.yml dilewati", () => {
+    const body = bootstrapBody("demo-landing", "o/demo-landing", ["package.json"], [
+      { path: ".github/workflows/ci.yml", reason: SKIP_REASON },
+    ]);
+    expect(body).toContain("## Dilewati");
+    expect(body).toContain("`.github/workflows/ci.yml`");
+    expect(body).toContain("bukan `test`");
+  });
+
+  it("body PR tanpa file dilewati tidak punya bagian Dilewati", () => {
+    expect(bootstrapBody("p", "o/p", ["package.json"])).not.toContain("Dilewati");
   });
 });

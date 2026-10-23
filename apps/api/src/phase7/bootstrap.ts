@@ -16,6 +16,19 @@ export interface BootstrapResult {
   pr_url?: string;
   branch?: string;
   files?: string[];
+  /** File template yang sudah ada di main sehingga tidak ditimpa. */
+  skipped?: SkippedFile[];
+}
+
+export interface SkippedFile {
+  path: string;
+  reason: string;
+}
+
+export const SKIP_REASON = "sudah ada di main, tidak ditimpa";
+
+export function skippedFiles(all: readonly { path: string }[], existing: ReadonlySet<string>): SkippedFile[] {
+  return all.filter((f) => existing.has(f.path)).map((f) => ({ path: f.path, reason: SKIP_REASON }));
 }
 
 export function bootstrapBranch(now: number): string {
@@ -23,13 +36,31 @@ export function bootstrapBranch(now: number): string {
   return `agent/bootstrap-${stamp}`;
 }
 
-export function bootstrapBody(project: string, repo: string, files: readonly string[]): string {
+export function bootstrapBody(
+  project: string,
+  repo: string,
+  files: readonly string[],
+  skipped: readonly SkippedFile[] = [],
+): string {
+  const skipLines =
+    skipped.length === 0
+      ? []
+      : [
+          "",
+          "## Dilewati (sudah ada di main)",
+          ...skipped.map((f) => `- \`${f.path}\``),
+          "",
+          skipped.some((f) => f.path === CI_WORKFLOW_PATH)
+            ? "`ci.yml` lama dipertahankan. Nama job-nya mungkin bukan `test`: wajibkan check dengan nama job yang sebenarnya di ruleset, atau ganti isinya dengan template."
+            : "File di atas tidak diubah; periksa apakah cocok dengan template.",
+        ];
   return [
     `Proyek: \`${project}\` (${repo})`,
     "",
     "## Template CI proyek baru (Fase 7c)",
     "Isi template tetap, bukan buatan AI:",
     ...files.map((f) => `- \`${f}\``),
+    ...skipLines,
     "",
     "Job CI bernama `test`: `npm run build` lalu `npm test` (cek `dist/index.html` + rujukan file lokal). Tanpa dependensi.",
     "",
@@ -62,20 +93,21 @@ export async function bootstrapProject(env: GithubEnv, project: Project, now = D
       if (await readRepoFile(inst.token, project.repo, f.path, "main")) existing.add(f.path);
     }
     const files = missingFiles(all, existing);
+    const skipped = skippedFiles(all, existing);
     if (files.length === 0) {
-      return { ok: false, status: 409, step: "exists", error: "semua file template sudah ada di main" };
+      return { ok: false, status: 409, step: "exists", error: "semua file template sudah ada di main", skipped };
     }
     const names = files.map((f) => f.path);
     const pr = await openPullRequest(env, {
       repo: project.repo,
       title: "agent: Template CI proyek baru",
-      body: bootstrapBody(project.name, project.repo, names),
+      body: bootstrapBody(project.name, project.repo, names, skipped),
       branch: bootstrapBranch(now),
       files,
       token: inst.token,
       allowCiWorkflow: names.includes(CI_WORKFLOW_PATH),
     });
-    return { ok: true, pr_number: pr.number, pr_url: pr.url, branch: pr.branch, files: names };
+    return { ok: true, pr_number: pr.number, pr_url: pr.url, branch: pr.branch, files: names, skipped };
   } catch (err) {
     if (err instanceof GithubError) {
       return { ok: false, status: 502, step: err.step, error: err.message };
